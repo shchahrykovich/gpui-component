@@ -1389,6 +1389,7 @@ impl Paragraph {
                 span.unwrap_or_default(),
                 self.inline_flow_items(node_cx, cx),
                 node_cx.link_click_handler.clone(),
+                node_cx.style.image_base.clone(),
             )
             .into_any_element();
         }
@@ -1423,44 +1424,47 @@ impl Paragraph {
                 }
                 let link_click_handler = node_cx.link_click_handler.clone();
                 child_nodes.push(
-                    img(image_source(&image.url))
-                        .id(ix)
-                        .object_fit(ObjectFit::Contain)
-                        .max_w(relative(1.))
-                        .when_some(image.width, |this, width| this.w(width))
-                        .when_some(image.link.clone(), |this, link| {
-                            let title = image.title();
-                            let link_click_handler = link_click_handler.clone();
-                            let aux_link = link.clone();
-                            let aux_link_click_handler = link_click_handler.clone();
-                            this.cursor_pointer()
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(title.clone()).build(window, cx)
-                                })
-                                .on_click(move |event, window, cx| {
-                                    gpui_base::TextSelection::end(window, cx);
-                                    cx.stop_propagation();
-                                    handle_link_click(
-                                        &link_click_handler,
-                                        link.url.clone(),
-                                        event.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                })
-                                .on_aux_click(move |event, window, cx| {
-                                    gpui_base::TextSelection::end(window, cx);
-                                    cx.stop_propagation();
-                                    handle_link_click(
-                                        &aux_link_click_handler,
-                                        aux_link.url.clone(),
-                                        event.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                })
-                        })
-                        .into_any_element(),
+                    img(image_source(
+                        &image.url,
+                        node_cx.style.image_base.as_deref(),
+                    ))
+                    .id(ix)
+                    .object_fit(ObjectFit::Contain)
+                    .max_w(relative(1.))
+                    .when_some(image.width, |this, width| this.w(width))
+                    .when_some(image.link.clone(), |this, link| {
+                        let title = image.title();
+                        let link_click_handler = link_click_handler.clone();
+                        let aux_link = link.clone();
+                        let aux_link_click_handler = link_click_handler.clone();
+                        this.cursor_pointer()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(title.clone()).build(window, cx)
+                            })
+                            .on_click(move |event, window, cx| {
+                                gpui_base::TextSelection::end(window, cx);
+                                cx.stop_propagation();
+                                handle_link_click(
+                                    &link_click_handler,
+                                    link.url.clone(),
+                                    event.clone(),
+                                    window,
+                                    cx,
+                                );
+                            })
+                            .on_aux_click(move |event, window, cx| {
+                                gpui_base::TextSelection::end(window, cx);
+                                cx.stop_propagation();
+                                handle_link_click(
+                                    &aux_link_click_handler,
+                                    aux_link.url.clone(),
+                                    event.clone(),
+                                    window,
+                                    cx,
+                                );
+                            })
+                    })
+                    .into_any_element(),
                 );
 
                 text.clear();

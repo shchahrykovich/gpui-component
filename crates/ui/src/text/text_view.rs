@@ -166,6 +166,17 @@ impl TextView {
         self
     }
 
+    /// Read this document's own image paths from `dir`.
+    ///
+    /// Say this only for a document that is a file on disk and is trusted: it
+    /// is what lets `![](diagrams/flow.svg)` in a local Markdown file find the
+    /// file beside it. Without it no image path reaches the file system at all.
+    /// See [`TextViewStyle::image_base`].
+    pub fn image_base(mut self, dir: impl AsRef<std::path::Path>) -> Self {
+        self.text_view_style.image_base = Some(std::sync::Arc::from(dir.as_ref()));
+        self
+    }
+
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;

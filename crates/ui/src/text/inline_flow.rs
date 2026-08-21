@@ -28,6 +28,9 @@ pub(super) struct InlineFlow {
     id: ElementId,
     items: Vec<InlineFlowItem>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    /// Where this document's own image paths are read from, if anywhere.
+    /// See [`super::TextViewStyle::image_base`].
+    image_base: Option<Arc<std::path::Path>>,
 }
 
 pub(super) enum InlineFlowItem {
@@ -109,14 +112,17 @@ impl InlineFlow {
         id: impl Into<ElementId>,
         items: Vec<InlineFlowItem>,
         link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+        image_base: Option<Arc<std::path::Path>>,
     ) -> Self {
         Self {
             id: id.into(),
             items,
             link_click_handler,
+            image_base,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn image_element(
         ix: usize,
         url: &SharedUri,
@@ -124,8 +130,9 @@ impl InlineFlow {
         title: &str,
         size: Size<Pixels>,
         link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+        image_base: Option<&std::path::Path>,
     ) -> AnyElement {
-        img(image_source(url))
+        img(image_source(url, image_base))
             .id(ix)
             .object_fit(ObjectFit::Contain)
             .max_w(relative(1.))
@@ -192,6 +199,7 @@ impl Element for InlineFlow {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let measure_items = self.items.iter().map(MeasureItem::from).collect::<Vec<_>>();
+        let image_base = self.image_base.clone();
         let line_height = window.line_height();
         let rem_size = window.rem_size();
         let image_sizes = measure_items
@@ -205,6 +213,7 @@ impl Element for InlineFlow {
                     *height,
                     line_height,
                     rem_size,
+                    image_base.as_deref(),
                     window,
                     cx,
                 )),
@@ -321,6 +330,7 @@ impl Element for InlineFlow {
                         title.as_str(),
                         fragment_size,
                         self.link_click_handler.clone(),
+                        self.image_base.as_deref(),
                     );
                     element.prepaint_as_root(
                         bounds.origin + origin,
@@ -610,26 +620,29 @@ fn measure_image_size(
     height: Option<DefiniteLength>,
     line_height: Pixels,
     rem_size: Pixels,
+    image_base: Option<&std::path::Path>,
     window: &mut Window,
     cx: &mut App,
 ) -> Size<Pixels> {
     let intrinsic_size = if width.is_some() && height.is_some() {
         None
     } else {
-        intrinsic_image_size(ix, url, width, height, window, cx)
+        intrinsic_image_size(ix, url, width, height, image_base, window, cx)
     };
     image_size(width, height, intrinsic_size, line_height, rem_size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn intrinsic_image_size(
     ix: usize,
     url: &SharedUri,
     width: Option<DefiniteLength>,
     height: Option<DefiniteLength>,
+    image_base: Option<&std::path::Path>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Size<Pixels>> {
-    let mut element = img(image_source(url))
+    let mut element = img(image_source(url, image_base))
         .id(ix)
         .object_fit(ObjectFit::Contain)
         .max_w(relative(1.))

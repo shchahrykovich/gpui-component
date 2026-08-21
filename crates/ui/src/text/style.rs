@@ -7,6 +7,18 @@ use crate::{ActiveTheme as _, highlighter::HighlightTheme};
 /// TextViewStyle used to customize the style for [`TextView`].
 #[derive(Clone)]
 pub struct TextViewStyle {
+    /// Where a document's own image paths are read from, if anywhere.
+    ///
+    /// `None`, the default, is what keeps a document from reaching the file
+    /// system: every image URL stays URI-backed, so a `file://` or a bare path
+    /// in untrusted Markdown loads nothing.
+    ///
+    /// Set it to a directory to say "this document is a file on disk, and I
+    /// trust it": an image path is then read from disk, and a relative one is
+    /// resolved against this directory. It is what an editor or a viewer
+    /// showing a local Markdown file wants, and what a chat window rendering
+    /// someone else's Markdown must not set.
+    pub image_base: Option<Arc<std::path::Path>>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
     /// Base font size for headings, default is 14px.
@@ -45,7 +57,8 @@ pub struct TextViewStyle {
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
-        self.paragraph_gap == other.paragraph_gap
+        self.image_base == other.image_base
+            && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && match (&self.heading_font_size, &other.heading_font_size) {
                 (Some(left), Some(right)) => (1..=6).all(|level| {
@@ -67,6 +80,7 @@ impl PartialEq for TextViewStyle {
 impl Default for TextViewStyle {
     fn default() -> Self {
         Self {
+            image_base: None,
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,
