@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, HighlightStyle, Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{App, HighlightStyle, Hsla, Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
 
@@ -19,6 +19,17 @@ pub struct TextViewStyle {
     /// showing a local Markdown file wants, and what a chat window rendering
     /// someone else's Markdown must not set.
     pub image_base: Option<Arc<std::path::Path>>,
+    /// Ranges of the source this document was parsed from that a caller wants
+    /// marked, each with the colour to mark it in.
+    ///
+    /// Empty by default, which draws nothing. A top-level block whose span
+    /// meets one of these ranges gets a bar in the margin beside it, the way a
+    /// code editor marks a changed line in its gutter — except that prose has
+    /// no lines to mark, so the block is the smallest thing there is.
+    ///
+    /// The bar is drawn outside the block's own box, so a document with marks
+    /// lays out exactly like one without.
+    pub marked_ranges: Arc<Vec<(std::ops::Range<usize>, Hsla)>>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
     /// Base font size for headings, default is 14px.
@@ -81,6 +92,7 @@ impl Default for TextViewStyle {
     fn default() -> Self {
         Self {
             image_base: None,
+            marked_ranges: Arc::new(Vec::new()),
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,

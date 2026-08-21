@@ -1,6 +1,6 @@
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, SharedString,
-    Styled as _, Window, div,
+    App, Div, Hsla, InteractiveElement as _, IntoElement, ListState, ParentElement as _,
+    SharedString, Styled as _, Window, div, px,
 };
 
 use std::ops::RangeInclusive;
@@ -188,15 +188,19 @@ impl ParsedDocument {
                 .id("document")
                 .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
                     let is_last = ix + 1 == blocks_len;
-                    node.render_block(
-                        NodeRenderOptions {
-                            ix,
-                            is_last,
-                            ..Default::default()
-                        },
-                        node_cx,
-                        window,
-                        cx,
+                    let mark = mark_for(node, node_cx);
+                    marked(
+                        node.render_block(
+                            NodeRenderOptions {
+                                ix,
+                                is_last,
+                                ..Default::default()
+                            },
+                            node_cx,
+                            window,
+                            cx,
+                        ),
+                        mark,
                     )
                 }));
         };
@@ -218,8 +222,9 @@ impl ParsedDocument {
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
                     let is_last = ix + 1 == blocks.len();
-                    blocks[ix]
-                        .render_block(
+                    let mark = mark_for(&blocks[ix], &node_cx);
+                    marked(
+                        blocks[ix].render_block(
                             NodeRenderOptions {
                                 ix,
                                 is_last,
@@ -228,11 +233,57 @@ impl ParsedDocument {
                             &node_cx,
                             window,
                             cx,
-                        )
-                        .into_any_element()
+                        ),
+                        mark,
+                    )
+                    .into_any_element()
                 }
             })
             .size_full(),
         )
     }
+}
+
+/// The colour a top-level block is marked in, if any.
+///
+/// A block is marked when its span meets one of `TextViewStyle::marked_ranges`.
+/// "Meets" rather than "is inside": a change of one word marks the paragraph
+/// holding it, which is the smallest thing prose has to point at.
+///
+/// The first range that meets it wins. Ranges are given by the caller in the
+/// order it wants them tried, and a block that is both changed and new is one
+/// the caller has already decided about.
+fn mark_for(node: &BlockNode, node_cx: &NodeContext) -> Option<Hsla> {
+    if node_cx.style.marked_ranges.is_empty() {
+        return None;
+    }
+    let span = node.span()?;
+    node_cx
+        .style
+        .marked_ranges
+        .iter()
+        .find(|(range, _)| span.start < range.end && range.start < span.end)
+        .map(|(_, color)| *color)
+}
+
+/// Put `block` in a box that carries a bar in the margin beside it.
+///
+/// The bar is absolutely positioned outside the box, so an unmarked document
+/// and a marked one lay out identically — nothing shifts when the marks arrive
+/// or go away.
+fn marked(block: impl IntoElement, mark: Option<Hsla>) -> Div {
+    let block = div().child(block);
+    let Some(color) = mark else {
+        return block;
+    };
+    block.relative().child(
+        div()
+            .absolute()
+            .left(px(-14.))
+            .top_0()
+            .bottom_0()
+            .w(px(2.))
+            .rounded_full()
+            .bg(color),
+    )
 }

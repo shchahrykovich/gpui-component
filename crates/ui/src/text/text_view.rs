@@ -177,6 +177,20 @@ impl TextView {
         self
     }
 
+    /// Mark the blocks that came from these ranges of the source.
+    ///
+    /// Each range is a byte range of the text this view was built from, with
+    /// the colour to mark it in. Every top-level block whose span meets one of
+    /// them gets a bar in the margin beside it — which is how a viewer shows
+    /// what changed in a document that has no line numbers to mark.
+    ///
+    /// The bar is drawn outside the block's own box, so a marked document lays
+    /// out exactly like an unmarked one. With no ranges nothing is drawn.
+    pub fn marked_ranges(mut self, ranges: Vec<(std::ops::Range<usize>, gpui::Hsla)>) -> Self {
+        self.text_view_style.marked_ranges = std::sync::Arc::new(ranges);
+        self
+    }
+
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
