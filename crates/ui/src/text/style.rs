@@ -1,8 +1,190 @@
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
-use gpui::{App, HighlightStyle, Hsla, Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{
+    App, Bounds, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyleRefinement, px, rems,
+};
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
+
+/// What a find bar is looking for in a rendered document.
+///
+/// A rendered document has no lines and no offsets a caller can point at, so
+/// the query itself is what is handed to the view: every occurrence of it in
+/// the text the reader sees is painted in `background`, and the one the reader
+/// is on — `current`, counting from the start of the document — in
+/// `current_background`.
+///
+/// How many occurrences there are, and where the current one ended up on
+/// screen, are known only once the document has been painted. They are put in
+/// [`TextSearchResults`], which the caller keeps and reads on the frame after
+/// it asked.
+///
+/// A paragraph that mixes an inline image with its text is laid out a line at
+/// a time, so an occurrence there that straddles a line break is counted as
+/// two. Every other paragraph holds its text in one piece and is exact.
+#[derive(Clone)]
+pub struct TextSearch {
+    /// The text to look for. An empty query finds nothing.
+    pub query: SharedString,
+    /// Match regardless of the case of ASCII letters. True by default, which
+    /// is what a find bar does.
+    pub case_insensitive: bool,
+    /// Which occurrence, counting from the start of the document, the reader is
+    /// on. Out of range means no occurrence is the current one.
+    pub current: usize,
+    /// The colour every occurrence is painted in. Painted over the text, so it
+    /// wants an alpha the way a selection does.
+    pub background: Hsla,
+    /// The colour the current occurrence is painted in instead.
+    pub current_background: Hsla,
+    /// Where the answers are put.
+    pub results: TextSearchResults,
+}
+
+/// What a document held the last time it was painted for a [`TextSearch`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextSearchResult {
+    /// How many occurrences of the query the document holds.
+    pub count: usize,
+    /// Where the current occurrence was painted, in window coordinates. `None`
+    /// when there is no current occurrence — an empty query, or an index past
+    /// the end.
+    pub current: Option<Bounds<Pixels>>,
+}
+
+/// The handle a caller keeps to read what its [`TextSearch`] found.
+///
+/// Cheap to clone: every clone reads and writes the same answer.
+#[derive(Clone, Default)]
+pub struct TextSearchResults(Arc<Mutex<TextSearchResult>>);
+
+impl std::fmt::Debug for TextSearchResults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TextSearchResults")
+            .field(&self.get())
+            .finish()
+    }
+}
+
+impl TextSearchResults {
+    /// What the last painted frame found.
+    pub fn get(&self) -> TextSearchResult {
+        self.0.lock().map(|found| *found).unwrap_or_default()
+    }
+
+    /// Start counting again, at the top of the document.
+    pub(crate) fn begin(&self) {
+        if let Ok(mut found) = self.0.lock() {
+            *found = TextSearchResult::default();
+        }
+    }
+
+    /// Claim `count` occurrences, and answer the ordinal of the first of them.
+    pub(crate) fn claim(&self, count: usize) -> usize {
+        let Ok(mut found) = self.0.lock() else {
+            return usize::MAX;
+        };
+        let first = found.count;
+        found.count += count;
+        first
+    }
+
+    pub(crate) fn set_current(&self, bounds: Bounds<Pixels>) {
+        if let Ok(mut found) = self.0.lock() {
+            found.current = Some(bounds);
+        }
+    }
+}
+
+impl TextSearch {
+    /// Look for `query`, painting every occurrence in `background`.
+    pub fn new(query: impl Into<SharedString>, background: Hsla) -> Self {
+        Self {
+            query: query.into(),
+            case_insensitive: true,
+            current: 0,
+            background,
+            current_background: background,
+            results: TextSearchResults::default(),
+        }
+    }
+
+    /// Which occurrence the reader is on, counting from the start.
+    pub fn current(mut self, current: usize) -> Self {
+        self.current = current;
+        self
+    }
+
+    /// The colour the current occurrence is painted in.
+    pub fn current_background(mut self, background: Hsla) -> Self {
+        self.current_background = background;
+        self
+    }
+
+    /// Tell apart `Query` from `query`.
+    pub fn case_sensitive(mut self) -> Self {
+        self.case_insensitive = false;
+        self
+    }
+
+    /// Read the answers through this handle rather than a fresh one.
+    pub fn results(mut self, results: TextSearchResults) -> Self {
+        self.results = results;
+        self
+    }
+
+    /// Where `text` holds the query.
+    pub(crate) fn matches_in(&self, text: &str) -> Vec<Range<usize>> {
+        matches_in(text, &self.query, self.case_insensitive)
+    }
+}
+
+impl PartialEq for TextSearch {
+    fn eq(&self, other: &Self) -> bool {
+        self.query == other.query
+            && self.case_insensitive == other.case_insensitive
+            && self.current == other.current
+            && self.background == other.background
+            && self.current_background == other.current_background
+    }
+}
+
+/// Every place `query` occurs in `text`, left to right and never overlapping.
+///
+/// Byte ranges of `text`, so the caller can slice with them. The case-blind
+/// comparison covers ASCII letters only — the same trade the editor's find bar
+/// makes, and the reason the answers stay byte-exact: folding the case of the
+/// whole text first would move every offset after a character whose lower case
+/// is a different length.
+///
+/// A window that starts in the middle of a character can never match: its first
+/// byte is a continuation byte, and the first byte of the query is either ASCII
+/// or the start of a character.
+pub(crate) fn matches_in(text: &str, query: &str, case_insensitive: bool) -> Vec<Range<usize>> {
+    if query.is_empty() || query.len() > text.len() {
+        return Vec::new();
+    }
+
+    let (haystack, needle) = (text.as_bytes(), query.as_bytes());
+    let mut found = Vec::new();
+    let mut ix = 0;
+    while ix + needle.len() <= haystack.len() {
+        let window = &haystack[ix..ix + needle.len()];
+        let hit = if case_insensitive {
+            window.eq_ignore_ascii_case(needle)
+        } else {
+            window == needle
+        };
+        if hit {
+            found.push(ix..ix + needle.len());
+            ix += needle.len();
+        } else {
+            ix += 1;
+        }
+    }
+    found
+}
 
 /// TextViewStyle used to customize the style for [`TextView`].
 #[derive(Clone)]
@@ -30,6 +212,11 @@ pub struct TextViewStyle {
     /// The bar is drawn outside the block's own box, so a document with marks
     /// lays out exactly like one without.
     pub marked_ranges: Arc<Vec<(std::ops::Range<usize>, Hsla)>>,
+    /// What a find bar is looking for in this document, if anything.
+    ///
+    /// `None`, the default, paints nothing and costs nothing. See
+    /// [`TextSearch`].
+    pub search: Option<TextSearch>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
     /// Base font size for headings, default is 14px.
@@ -68,6 +255,11 @@ pub struct TextViewStyle {
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
+        // `marked_ranges` and `search` are deliberately left out: this
+        // comparison is what bumps the selection revision, and neither of them
+        // changes a single character of the text a selection is taken from.
+        // The find bar changes its query on every keystroke, and a reader's
+        // selection must survive that.
         self.image_base == other.image_base
             && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
@@ -93,6 +285,7 @@ impl Default for TextViewStyle {
         Self {
             image_base: None,
             marked_ranges: Arc::new(Vec::new()),
+            search: None,
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,
@@ -188,5 +381,46 @@ mod tests {
     fn cloning_preserves_the_same_heading_callback_fingerprint() {
         let style = TextViewStyle::default().heading_font_size(|_, size| size);
         assert!(style == style.clone());
+    }
+
+    #[test]
+    fn occurrences_are_found_left_to_right_and_never_overlap() {
+        assert_eq!(
+            matches_in("a cat and a cat", "cat", true),
+            vec![2..5, 12..15]
+        );
+        assert_eq!(matches_in("aaaa", "aa", true), vec![0..2, 2..4]);
+    }
+
+    #[test]
+    fn the_case_of_a_letter_does_not_hide_an_occurrence() {
+        assert_eq!(
+            matches_in("Cat CAT cat", "cat", true),
+            vec![0..3, 4..7, 8..11]
+        );
+        assert_eq!(matches_in("Cat CAT cat", "cat", false), vec![8..11]);
+    }
+
+    /// The ranges are byte ranges of the text as it is, so they can slice it.
+    #[test]
+    fn an_occurrence_after_a_wide_character_keeps_its_byte_offsets() {
+        let text = "héllo cat";
+        let found = matches_in(text, "cat", true);
+        assert_eq!(found, vec![7..10]);
+        assert_eq!(&text[found[0].clone()], "cat");
+    }
+
+    /// A window that starts inside a character cannot match: it begins with a
+    /// continuation byte, and no query does.
+    #[test]
+    fn a_query_never_matches_the_middle_of_a_character() {
+        assert!(matches_in("日本語", "本", true).len() == 1);
+        assert!(matches_in("日本語", "\u{fffd}", true).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_found_for_an_empty_query_or_a_query_longer_than_the_text() {
+        assert!(matches_in("cat", "", true).is_empty());
+        assert!(matches_in("cat", "cats", true).is_empty());
     }
 }

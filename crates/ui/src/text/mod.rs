@@ -4,6 +4,8 @@ mod inline;
 mod inline_flow;
 mod markdown_ext;
 mod node;
+#[cfg(test)]
+mod search_test;
 pub(crate) mod selection;
 mod selection_adapter;
 mod state;

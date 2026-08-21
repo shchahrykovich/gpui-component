@@ -564,6 +564,12 @@ impl Render for TextViewState {
         node_cx.markdown_extensions = self.markdown_extensions.clone();
         node_cx.style = self.text_view_style.clone();
 
+        // A frame counts the occurrences again from the top of the document,
+        // because that is the only order the blocks are painted in.
+        if let Some(search) = &node_cx.style.search {
+            search.results.begin();
+        }
+
         v_flex()
             .size_full()
             .map(|this| match &mut self.parsed_error {

@@ -191,6 +191,18 @@ impl TextView {
         self
     }
 
+    /// Look for a query in what this document shows.
+    ///
+    /// Every occurrence in the rendered text is painted, and the one the reader
+    /// is on is painted differently. How many there are, and where the current
+    /// one is on screen, come back through [`TextSearch::results`] once the
+    /// document has been painted — which is what a find bar needs to say "3 of
+    /// 17" and to scroll the third one into view. See [`TextSearch`].
+    pub fn search(mut self, search: crate::text::TextSearch) -> Self {
+        self.text_view_style.search = Some(search);
+        self
+    }
+
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;

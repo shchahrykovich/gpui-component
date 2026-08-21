@@ -19,6 +19,7 @@ use crate::{
 use super::{
     inline::{Inline, InlineState},
     node::LinkMark,
+    style::TextSearch,
     utils::image_source,
 };
 
@@ -31,6 +32,8 @@ pub(super) struct InlineFlow {
     /// Where this document's own image paths are read from, if anywhere.
     /// See [`super::TextViewStyle::image_base`].
     image_base: Option<Arc<std::path::Path>>,
+    /// What a find bar is looking for. See [`InlineFlow::search`].
+    search: Option<TextSearch>,
 }
 
 pub(super) enum InlineFlowItem {
@@ -119,7 +122,20 @@ impl InlineFlow {
             items,
             link_click_handler,
             image_base,
+            search: None,
         }
+    }
+
+    /// What a find bar is looking for, passed on to every run this flow lays
+    /// out.
+    ///
+    /// A flow is laid out a line at a time, so an occurrence that straddles a
+    /// line break here is painted, and counted, as two. Every paragraph that
+    /// does not mix an inline image with its text keeps its run in one piece
+    /// and is exact.
+    pub(super) fn search(mut self, search: Option<TextSearch>) -> Self {
+        self.search = search;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -300,6 +316,7 @@ impl Element for InlineFlow {
                         highlights,
                         self.link_click_handler.clone(),
                     )
+                    .search(self.search.as_ref())
                     .into_any_element();
                     element.prepaint_as_root(
                         bounds.origin + origin,

@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{
     App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId, GlobalElementId,
-    Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    Half, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
     SharedString, StyledText, TextLayout, Window, point, px, quad,
 };
@@ -19,6 +19,7 @@ use crate::{
     text::TextViewMultiClickKind,
     text::node::LinkMark,
     text::selection::word_range_at,
+    text::style::TextSearch,
     text::text_view::{LinkClickHandlerFn, handle_link_click},
 };
 
@@ -32,6 +33,13 @@ pub(super) struct Inline {
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    /// What a find bar is looking for, and where this run holds it.
+    ///
+    /// The occurrences are found once, when the element is built, and painted
+    /// like a selection: over the text, in a colour with an alpha. They are
+    /// numbered in `paint` rather than here, because paint is the pass that
+    /// runs over the blocks in the order they are read.
+    search: Option<(TextSearch, Vec<Range<usize>>)>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -72,8 +80,25 @@ impl Inline {
             text: text.clone(),
             styled_text: StyledText::new(text),
             link_click_handler,
+            search: None,
             state,
         }
+    }
+
+    /// Paint what a find bar is looking for, where this run holds it.
+    ///
+    /// Nothing is done for a document nobody is searching, or a run the query
+    /// does not occur in — the common case, and the reason the answer is worked
+    /// out here rather than on every frame of the paint pass.
+    pub(super) fn search(mut self, search: Option<&TextSearch>) -> Self {
+        let Some(search) = search else {
+            return self;
+        };
+        let matches = search.matches_in(&self.text);
+        if !matches.is_empty() {
+            self.search = Some((search.clone(), matches));
+        }
+        self
     }
 
     /// Get link at given mouse position.
@@ -301,78 +326,69 @@ impl Inline {
         line_bounds
     }
 
-    /// Paint the selection background.
-    fn paint_selection(
-        selection: &Selection,
+    /// Paint a band over the text, the way a selection is drawn.
+    ///
+    /// A range that wraps is drawn as three bands: the tail of its first line,
+    /// the whole of the lines between, and the head of its last one. The colour
+    /// is painted over the glyphs, so it wants an alpha.
+    fn paint_band(
+        range: Range<usize>,
+        color: Hsla,
         text_layout: &TextLayout,
         bounds: &Bounds<Pixels>,
         window: &mut Window,
-        cx: &mut App,
-    ) {
-        let mut start = selection.start;
-        let mut end = selection.end;
+    ) -> Option<Bounds<Pixels>> {
+        let mut start = range.start;
+        let mut end = range.end;
         if end < start {
             std::mem::swap(&mut start, &mut end);
         }
-        let Some(start_position) = text_layout.position_for_index(start) else {
-            return;
-        };
-        let Some(end_position) = text_layout.position_for_index(end) else {
-            return;
-        };
+        let start_position = text_layout.position_for_index(start)?;
+        let end_position = text_layout.position_for_index(end)?;
 
         let line_height = text_layout.line_height();
+        let band = |bounds: Bounds<Pixels>| {
+            quad(
+                bounds,
+                px(0.),
+                color,
+                Edges::default(),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            )
+        };
+
         if start_position.y == end_position.y {
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    start_position,
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                px(0.),
-                cx.theme().selection,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
-            ));
+            window.paint_quad(band(Bounds::from_corners(
+                start_position,
+                point(end_position.x, end_position.y + line_height),
+            )));
         } else {
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    start_position,
-                    point(bounds.right(), start_position.y + line_height),
-                ),
-                px(0.),
-                cx.theme().selection,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
-            ));
+            window.paint_quad(band(Bounds::from_corners(
+                start_position,
+                point(bounds.right(), start_position.y + line_height),
+            )));
 
             if end_position.y > start_position.y + line_height {
-                window.paint_quad(quad(
-                    Bounds::from_corners(
-                        point(bounds.left(), start_position.y + line_height),
-                        point(bounds.right(), end_position.y),
-                    ),
-                    px(0.),
-                    cx.theme().selection,
-                    Edges::default(),
-                    gpui::transparent_black(),
-                    BorderStyle::default(),
-                ));
+                window.paint_quad(band(Bounds::from_corners(
+                    point(bounds.left(), start_position.y + line_height),
+                    point(bounds.right(), end_position.y),
+                )));
             }
 
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    point(bounds.left(), end_position.y),
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                px(0.),
-                cx.theme().selection,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
-            ));
+            window.paint_quad(band(Bounds::from_corners(
+                point(bounds.left(), end_position.y),
+                point(end_position.x, end_position.y + line_height),
+            )));
         }
+
+        Some(Bounds::from_corners(
+            point(start_position.x.min(end_position.x), start_position.y),
+            point(
+                start_position.x.max(end_position.x),
+                end_position.y + line_height,
+            ),
+        ))
     }
 }
 
@@ -479,7 +495,32 @@ impl Element for Inline {
         }
 
         if let Some(selection) = &state.selection {
-            Self::paint_selection(selection, &text_layout, &bounds, window, cx);
+            Self::paint_band(
+                selection.start..selection.end,
+                cx.theme().selection,
+                &text_layout,
+                &bounds,
+                window,
+            );
+        }
+
+        // What the find bar is looking for, numbered from the top of the
+        // document: paint runs over the blocks in the order they are read, so
+        // the ordinal a run claims here is the one the reader is counting.
+        if let Some((search, matches)) = &self.search {
+            let first = search.results.claim(matches.len());
+            for (ix, range) in matches.iter().enumerate() {
+                let is_current = first.saturating_add(ix) == search.current;
+                let color = if is_current {
+                    search.current_background
+                } else {
+                    search.background
+                };
+                let painted = Self::paint_band(range.clone(), color, &text_layout, &bounds, window);
+                if let (true, Some(painted)) = (is_current, painted) {
+                    search.results.set_current(painted);
+                }
+            }
         }
 
         if is_selectable {

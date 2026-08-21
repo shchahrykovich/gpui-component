@@ -1327,13 +1327,16 @@ impl CodeBlock {
                     .text_size(cx.theme().mono_font_size)
                     .relative()
                     .refine_style(&style.code_block)
-                    .child(Inline::new(
-                        "code",
-                        self.state.clone(),
-                        vec![],
-                        self.styles(&cx.theme().highlight_theme),
-                        node_cx.link_click_handler.clone(),
-                    ))
+                    .child(
+                        Inline::new(
+                            "code",
+                            self.state.clone(),
+                            vec![],
+                            self.styles(&cx.theme().highlight_theme),
+                            node_cx.link_click_handler.clone(),
+                        )
+                        .search(node_cx.style.search.as_ref()),
+                    )
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
                             div()
@@ -1391,6 +1394,7 @@ impl Paragraph {
                 node_cx.link_click_handler.clone(),
                 node_cx.style.image_base.clone(),
             )
+            .search(node_cx.style.search.clone())
             .into_any_element();
         }
 
@@ -1419,6 +1423,7 @@ impl Paragraph {
                             highlights.clone(),
                             node_cx.link_click_handler.clone(),
                         )
+                        .search(node_cx.style.search.as_ref())
                         .into_any_element(),
                     );
                 }
@@ -1541,6 +1546,7 @@ impl Paragraph {
                     highlights,
                     node_cx.link_click_handler.clone(),
                 )
+                .search(node_cx.style.search.as_ref())
                 .into_any_element(),
             );
         }
