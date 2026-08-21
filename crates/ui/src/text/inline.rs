@@ -105,6 +105,37 @@ impl Inline {
         });
     }
 
+    /// The byte range of `self.text` whose characters can reach `band`.
+    ///
+    /// `position_for_index` walks the line layout on every call, so asking it
+    /// for every character of every paragraph is what made painting a long
+    /// document cost a whole frame. A byte index only ever moves down the
+    /// page, never up, so the characters that reach a horizontal band form one
+    /// run and the rest can be skipped without looking at them.
+    ///
+    /// A line of slack above and below keeps a character that straddles the
+    /// edge of the band, which a point lookup at the exact edge could round
+    /// past. The answer is therefore never smaller than the truth, and every
+    /// caller still tests each character it is handed.
+    fn text_range_in(
+        &self,
+        text_layout: &TextLayout,
+        band: Bounds<Pixels>,
+        line_height: Pixels,
+    ) -> Range<usize> {
+        let index_at = |x: Pixels, y: Pixels| {
+            text_layout
+                .index_for_position(point(x, y))
+                .unwrap_or_else(|index| index)
+                .min(self.text.len())
+        };
+
+        let start = index_at(band.left(), band.top() - line_height);
+        let end = index_at(band.right(), band.bottom() + line_height);
+
+        floor_char_boundary(&self.text, start)..ceil_char_boundary(&self.text, end.max(start))
+    }
+
     fn layout_selections(
         &self,
         text_layout: &TextLayout,
@@ -168,9 +199,20 @@ impl Inline {
         // (not scrolled) lies outside that band and is still excluded, while
         // the highlight quads painted for off-screen glyphs are clipped away by
         // GPUI's content mask as before.
+        //
+        // A character outside the band is rejected by
+        // `point_in_text_selection`, so narrowing the walk to the band first
+        // leaves the answer unchanged. Most paragraphs of a long document lie
+        // outside it entirely and are now skipped without a single lookup.
+        let band = Bounds::from_corners(
+            point(bounds.left(), selection_start.y.min(selection_end.y)),
+            point(bounds.right(), selection_start.y.max(selection_end.y)),
+        );
+        let range = self.text_range_in(text_layout, band, line_height);
+
         let mut selection: Option<Selection> = None;
-        let mut offset = 0;
-        let mut chars = self.text.chars().peekable();
+        let mut offset = range.start;
+        let mut chars = self.text[range].chars().peekable();
         while let Some(c) = chars.next() {
             let Some(pos) = text_layout.position_for_index(offset) else {
                 offset += c.len_utf8();
@@ -208,12 +250,18 @@ impl Inline {
         line_height: Pixels,
         mask_bounds: Bounds<Pixels>,
     ) -> Vec<Bounds<Pixels>> {
+        // Every box this drops is one the intersection below would have
+        // reduced to nothing, so the answer is the same and the work is
+        // proportional to what is on screen rather than to the length of the
+        // paragraph.
+        let range = self.text_range_in(text_layout, mask_bounds, line_height);
+
         let mut line_bounds = Vec::new();
         let mut current_line_y = None;
         let mut current_bounds: Option<Bounds<Pixels>> = None;
-        let mut offset = 0;
+        let mut offset = range.start;
 
-        for c in self.text.chars() {
+        for c in self.text[range].chars() {
             let next_offset = offset + c.len_utf8();
             let Some(pos) = text_layout.position_for_index(offset) else {
                 offset = next_offset;
@@ -583,6 +631,31 @@ fn selection_for_multi_click(
         // so triple-click only selects the run on the clicked side of the image.
         TextViewMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
     }
+}
+
+/// The largest char boundary at or before `index`.
+///
+/// `str::floor_char_boundary` is still unstable, and slicing on a byte that
+/// falls inside a character panics.
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// The smallest char boundary at or after `index`.
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 /// Check if a `pos` is within a `bounds`, considering multi-line selections.
