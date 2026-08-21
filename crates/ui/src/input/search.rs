@@ -73,6 +73,27 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         self.session = session.clone();
     }
 
+    /// Put a query the field does not already hold into it.
+    ///
+    /// Nothing happens when the field is the source of the query, which is the
+    /// common case: it is what the reader just typed, and writing it back would
+    /// put the caret at the end of it in the middle of a word.
+    pub(super) fn sync_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.read(cx).value().as_ref() == query {
+            return;
+        }
+        self.search_input.update(cx, |input, cx| {
+            input.set_value(query.to_string(), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The query field, for the tests that type into it.
+    #[cfg(test)]
+    pub(super) fn search_input(&self) -> &Entity<InputState> {
+        &self.search_input
+    }
+
     pub(crate) fn new(
         editor: Entity<InputBaseState<M>>,
         window: &mut Window,

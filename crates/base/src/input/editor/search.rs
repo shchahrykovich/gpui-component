@@ -25,6 +25,13 @@ pub struct SearchSession {
     pub replacement: String,
     pub anchor_offset: Option<usize>,
     pub matcher: SearchMatcher,
+    /// Counts the times the bar has been opened.
+    ///
+    /// The UI shows the bar again when this changes, and re-selects whatever
+    /// the query field holds — so pressing the find key over an already-open
+    /// bar still offers the old query for replacing. A keystroke changes only
+    /// `query`, and must not re-select the word being typed.
+    pub open_revision: u64,
 }
 
 impl Default for SearchSession {
@@ -37,6 +44,7 @@ impl Default for SearchSession {
             replacement: String::new(),
             anchor_offset: None,
             matcher: SearchMatcher::new(),
+            open_revision: 0,
         }
     }
 }
@@ -45,6 +53,7 @@ impl SearchSession {
     pub(crate) fn open(&mut self, replace_mode: bool, replaceable: bool) {
         self.open = true;
         self.replace_mode = replace_mode && replaceable;
+        self.open_revision = self.open_revision.wrapping_add(1);
     }
 
     pub(crate) fn close(&mut self) {

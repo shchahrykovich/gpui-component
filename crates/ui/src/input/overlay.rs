@@ -25,7 +25,16 @@ impl<M: OverlayMode> Global for InputOverlayRegistry<M> {}
 
 struct InputOverlayHost<M: OverlayMode> {
     search: Entity<SearchPanel<M>>,
-    search_signature: (bool, bool, String, Option<usize>),
+    /// What makes the bar appear, or appear again: whether it is open, which
+    /// half it opens on, where it was anchored, and how many times it has been
+    /// opened. The query is deliberately not here — see `search_query`.
+    search_signature: (bool, bool, Option<usize>, u64),
+    /// The query the panel was last told about.
+    ///
+    /// A query typed into the field arrives back here on the next frame, and
+    /// the field already holds it, so nothing is written back. A query set from
+    /// outside the field does not, and is carried into it.
+    search_query: String,
     /// The language-feature popovers. Only a code editor has them.
     lsp: Option<LspOverlays>,
 }
@@ -280,7 +289,8 @@ impl<M: OverlayMode> InputOverlayHost<M> {
     fn new(state: Entity<InputBaseState<M>>, window: &mut Window, cx: &mut App) -> Self {
         Self {
             search: SearchPanel::new(state.clone(), window, cx),
-            search_signature: (false, false, String::new(), None),
+            search_signature: (false, false, None, 0),
+            search_query: String::new(),
             lsp: M::build_lsp(&state, window, cx),
         }
     }
@@ -304,11 +314,12 @@ impl<M: OverlayMode> InputOverlayHost<M> {
         let search_signature = (
             search_open,
             replace_mode,
-            search_session.query.clone(),
             search_session.anchor_offset,
+            search_session.open_revision,
         );
         if search_signature != self.search_signature {
             self.search_signature = search_signature;
+            self.search_query = search_session.query.clone();
             self.search.update(cx, |panel, cx| {
                 if search_open {
                     let selected = Rope::from(search_session.query.clone());
@@ -325,6 +336,15 @@ impl<M: OverlayMode> InputOverlayHost<M> {
                     panel.hide_with_focus(!cfg!(test), window, cx);
                 }
             });
+        } else if search_open && search_session.query != self.search_query {
+            // The query changed with the bar left as it was. That is either the
+            // reader typing — the field already holds it, and writing it back
+            // would move the caret — or a caller setting it from outside, which
+            // the field has to be told about.
+            self.search_query = search_session.query.clone();
+            let query = search_session.query.clone();
+            self.search
+                .update(cx, |panel, cx| panel.sync_query(&query, window, cx));
         }
 
         if let (Some(lsp), Some(snapshot)) = (self.lsp.as_mut(), snapshot.as_ref()) {
@@ -411,6 +431,98 @@ mod tests {
         ) -> impl IntoElement {
             div()
         }
+    }
+
+    /// Typing a word into the find bar must leave that word in the field.
+    ///
+    /// The query is part of the signature that decides whether the panel is
+    /// shown again, and showing it selects everything in the field — so every
+    /// keystroke used to select what was typed so far, and the next character
+    /// replaced it. Typing "zebra" left "a".
+    #[gpui::test]
+    fn typing_in_the_find_bar_builds_up_the_word(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| OverlayProbe {
+            state: cx.new(|cx| crate::input::EditorState::new(window, cx).searchable(true)),
+        });
+        let state = probe.read_with(cx, |probe, _| probe.state.clone());
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_value("hello world", window, cx);
+                state.open_search(false, cx);
+            });
+
+            let mut host = InputOverlayHost::new(state.clone(), window, cx);
+            host.sync(&state, window, cx);
+            let input = host.search.read(cx).search_input().clone();
+
+            // One character at a time, the way the field is actually filled:
+            // the panel's own subscription hands each new value to the engine,
+            // and the frame after it syncs.
+            for ch in "zebra".chars() {
+                input.update(cx, |input, cx| input.replace(ch.to_string(), window, cx));
+                let query = input.read(cx).value().to_string();
+                state.update(cx, |state, cx| state.set_search_query(query, true, cx));
+                host.sync(&state, window, cx);
+                assert!(
+                    input.read(cx).selected_range().is_empty(),
+                    "the field must not select itself while it is being typed in"
+                );
+            }
+
+            assert_eq!(input.read(cx).value(), "zebra");
+            assert_eq!(state.read(cx).search_session().query, "zebra");
+            assert!(
+                state.read(cx).search_session().matcher.is_empty(),
+                "a word the document does not hold is still a word the reader may type"
+            );
+        });
+    }
+
+    /// Opening the bar over an already-open bar still offers the old query for
+    /// replacing, and a query set from outside the field still reaches it.
+    ///
+    /// Both used to come free of the query being part of the signature. They
+    /// are what the open count and `sync_query` are for now.
+    #[gpui::test]
+    fn the_field_is_re_selected_on_a_second_open_and_follows_the_engine(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| OverlayProbe {
+            state: cx.new(|cx| crate::input::EditorState::new(window, cx).searchable(true)),
+        });
+        let state = probe.read_with(cx, |probe, _| probe.state.clone());
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_value("hello world", window, cx);
+                state.open_search(false, cx);
+            });
+            let mut host = InputOverlayHost::new(state.clone(), window, cx);
+            host.sync(&state, window, cx);
+            let input = host.search.read(cx).search_input().clone();
+
+            input.update(cx, |input, cx| input.replace("world", window, cx));
+            state.update(cx, |state, cx| state.set_search_query("world", true, cx));
+            host.sync(&state, window, cx);
+            assert!(input.read(cx).selected_range().is_empty());
+
+            // The find key again, with the bar already up.
+            state.update(cx, |state, cx| state.open_search(false, cx));
+            host.sync(&state, window, cx);
+            assert_eq!(
+                input.read(cx).selected_range(),
+                0..5,
+                "the old query is offered for replacing"
+            );
+
+            // A query set by the app rather than by the field.
+            state.update(cx, |state, cx| state.set_search_query("hello", true, cx));
+            host.sync(&state, window, cx);
+            assert_eq!(input.read(cx).value(), "hello");
+        });
     }
 
     /// A frame that changed nothing must not rebuild the popovers.
