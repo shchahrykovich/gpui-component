@@ -28,7 +28,9 @@ use ropey::Rope;
 
 use super::decorations::DecorationCollections;
 use super::lsp::{ContextMenuContent, HoverDefinition, InlineCompletion};
-use crate::input::{HighlightStyleResolver, InputEdit, InputHighlighter, TextDecoration};
+use crate::input::{
+    GutterMark, HighlightStyleResolver, InputEdit, InputHighlighter, TextDecoration,
+};
 use crate::input::{HoverPopoverState, Lsp};
 use gpui::Task;
 
@@ -78,6 +80,11 @@ pub trait InputExtras: Default + 'static {
     /// Decoration ranges to paint, innermost collection first.
     fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
         Vec::new()
+    }
+
+    /// Marks to paint in the gutter, beside the line numbers.
+    fn gutter_marks(&self) -> &[GutterMark] {
+        &[]
     }
 
     /// Semantic-token styles for a visible range, when an LSP supplies them.
@@ -326,6 +333,7 @@ impl InputModeKind for TextareaMode {
 pub struct EditorExtras {
     pub(crate) lsp: Lsp,
     pub(crate) decorations: DecorationCollections,
+    pub(crate) gutter_marks: Vec<GutterMark>,
     pub(crate) inline_completion: InlineCompletion,
     pub(crate) context_menu_content: ContextMenuContent,
     pub(crate) hover_popover: Option<HoverPopoverState>,
@@ -338,6 +346,7 @@ impl Default for EditorExtras {
         Self {
             lsp: Lsp::default(),
             decorations: DecorationCollections::default(),
+            gutter_marks: Vec::new(),
             inline_completion: InlineCompletion::default(),
             context_menu_content: ContextMenuContent::default(),
             hover_popover: None,

@@ -1,4 +1,4 @@
-use crate::input::{InputExtras as _, InputModeKind};
+use crate::input::{GutterMark, GutterMarkShape, InputExtras as _, InputModeKind};
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
@@ -297,6 +297,35 @@ fn editor_gutter_bounds(
         ),
     }
 }
+
+/// Where one gutter mark is drawn, given the row it belongs to.
+///
+/// `row_y` and `row_height` describe the row as it is on screen, so a soft-
+/// wrapped row that occupies three lines gets a bar three lines tall. A
+/// boundary mark stands for something that is no longer in the buffer, so it
+/// straddles the line above the row rather than covering it.
+fn gutter_mark_bounds(
+    mark: &GutterMark,
+    gutter_x: Pixels,
+    row_y: Pixels,
+    row_height: Pixels,
+) -> Bounds<Pixels> {
+    let (y, height) = match mark.shape {
+        GutterMarkShape::Bar => (row_y, row_height),
+        GutterMarkShape::Boundary => (
+            row_y - GUTTER_BOUNDARY_MARK_HEIGHT / 2.,
+            GUTTER_BOUNDARY_MARK_HEIGHT,
+        ),
+    };
+    Bounds::new(point(gutter_x, y), size(GUTTER_MARK_WIDTH, height))
+}
+
+/// How wide a gutter mark is drawn.
+const GUTTER_MARK_WIDTH: Pixels = px(3.);
+
+/// How tall a boundary mark is drawn. Short, because it stands for lines that
+/// are not there: a full-height bar would claim the row below them.
+const GUTTER_BOUNDARY_MARK_HEIGHT: Pixels = px(5.);
 
 use super::MASK_CHAR;
 
@@ -2270,6 +2299,26 @@ impl<M: InputModeKind> Element for TextElement<M> {
             );
             window.paint_quad(fill(gutter_bounds, gutter_bg));
 
+            // Only the marks that reach the rows on screen are taken, so a file
+            // with thousands of them costs one pass over the list per frame and
+            // clones a handful rather than all of them. The state cannot stay
+            // borrowed here: painting a line needs `cx` mutably.
+            let visible_marks: Vec<GutterMark> = {
+                let visible = &prepaint.last_layout.visible_buffer_lines;
+                match (visible.first(), visible.last()) {
+                    (Some(&first), Some(&last)) => self
+                        .state
+                        .read(cx)
+                        .extras
+                        .gutter_marks()
+                        .iter()
+                        .filter(|mark| mark.overlaps(first, last))
+                        .cloned()
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+
             // Each item is the normal lines.
             for (lines, &buffer_line) in line_numbers
                 .iter()
@@ -2290,6 +2339,15 @@ impl<M: InputModeKind> Element for TextElement<M> {
                             bg_color,
                         ));
                     }
+                }
+
+                // A gutter mark sits on top of that background, flush with the
+                // left edge of the gutter. A boundary mark is centred on the
+                // line above it, because what it stands for is no longer in the
+                // buffer and has no row of its own.
+                if let Some(mark) = visible_marks.iter().find(|mark| mark.covers(buffer_line)) {
+                    let quad = gutter_mark_bounds(mark, gutter_bounds.origin.x, p.y, height);
+                    window.paint_quad(fill(quad, mark.color));
                 }
 
                 for line in lines {
@@ -2631,6 +2689,30 @@ mod tests {
                 },
             ),
             Bounds::new(point(px(3.), px(18.)), size(px(55.), px(103.)))
+        );
+    }
+
+    /// A bar covers its row, and a boundary mark sits on the line above it.
+    /// Both are flush with the left edge of the gutter, which is what makes a
+    /// column of them read as one column.
+    #[test]
+    fn test_gutter_mark_covers_its_row_and_a_boundary_straddles_the_line_above() {
+        let bar = GutterMark::bar(4..6, gpui::green());
+        assert_eq!(
+            gutter_mark_bounds(&bar, px(3.), px(40.), px(20.)),
+            Bounds::new(point(px(3.), px(40.)), size(px(3.), px(20.)))
+        );
+
+        // A soft-wrapped row is taller, and the bar follows it.
+        assert_eq!(
+            gutter_mark_bounds(&bar, px(3.), px(40.), px(60.)),
+            Bounds::new(point(px(3.), px(40.)), size(px(3.), px(60.)))
+        );
+
+        let boundary = GutterMark::boundary(4, gpui::red());
+        assert_eq!(
+            gutter_mark_bounds(&boundary, px(3.), px(40.), px(20.)),
+            Bounds::new(point(px(3.), px(37.5)), size(px(3.), px(5.)))
         );
     }
 
