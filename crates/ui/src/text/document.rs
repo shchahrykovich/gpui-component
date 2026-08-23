@@ -1,6 +1,6 @@
 use gpui::{
     App, Div, Hsla, InteractiveElement as _, IntoElement, ListState, ParentElement as _,
-    SharedString, Styled as _, Window, div, px,
+    SharedString, Styled as _, Window, canvas, div, px,
 };
 
 use std::ops::RangeInclusive;
@@ -189,18 +189,22 @@ impl ParsedDocument {
                 .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
                     let is_last = ix + 1 == blocks_len;
                     let mark = mark_for(node, node_cx);
-                    marked(
-                        node.render_block(
-                            NodeRenderOptions {
-                                ix,
-                                is_last,
-                                ..Default::default()
-                            },
-                            node_cx,
-                            window,
-                            cx,
+                    anchored(
+                        marked(
+                            node.render_block(
+                                NodeRenderOptions {
+                                    ix,
+                                    is_last,
+                                    ..Default::default()
+                                },
+                                node_cx,
+                                window,
+                                cx,
+                            ),
+                            mark,
                         ),
-                        mark,
+                        node,
+                        node_cx,
                     )
                 }));
         };
@@ -223,18 +227,22 @@ impl ParsedDocument {
                 move |ix, window, cx| {
                     let is_last = ix + 1 == blocks.len();
                     let mark = mark_for(&blocks[ix], &node_cx);
-                    marked(
-                        blocks[ix].render_block(
-                            NodeRenderOptions {
-                                ix,
-                                is_last,
-                                ..options
-                            },
-                            &node_cx,
-                            window,
-                            cx,
+                    anchored(
+                        marked(
+                            blocks[ix].render_block(
+                                NodeRenderOptions {
+                                    ix,
+                                    is_last,
+                                    ..options
+                                },
+                                &node_cx,
+                                window,
+                                cx,
+                            ),
+                            mark,
                         ),
-                        mark,
+                        &blocks[ix],
+                        &node_cx,
                     )
                     .into_any_element()
                 }
@@ -264,6 +272,34 @@ fn mark_for(node: &BlockNode, node_cx: &NodeContext) -> Option<Hsla> {
         .iter()
         .find(|(range, _)| span.start < range.end && range.start < span.end)
         .map(|(_, color)| *color)
+}
+
+/// Note where this block was drawn, for a caller that asked for anchors.
+///
+/// The canvas draws nothing and is taken out of the flow, so an anchored
+/// document lays out exactly like one without anchors — the same arrangement
+/// the margin bar in [`marked`] uses. It is given an inset as well as a size:
+/// an absolutely positioned element with no inset is laid out where it would
+/// have sat in flow, which here is one whole block below the block it is
+/// measuring.
+///
+/// A block with no span is skipped rather than recorded at offset zero, which
+/// would put a second answer on the top of the document.
+fn anchored(block: Div, node: &BlockNode, node_cx: &NodeContext) -> Div {
+    let (Some(anchors), Some(span)) = (node_cx.style.anchors.clone(), node.span()) else {
+        return block;
+    };
+    let source = span.start;
+    block.relative().child(
+        canvas(
+            move |bounds, _, _| anchors.record(source, bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
 }
 
 /// Put `block` in a box that carries a bar in the margin beside it.

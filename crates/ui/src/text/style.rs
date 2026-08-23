@@ -97,6 +97,59 @@ impl TextSearchResults {
     }
 }
 
+/// One top-level block of a document, and where the last frame drew it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextAnchor {
+    /// Where the block begins in the source the document was built from.
+    pub source: usize,
+    /// Where it was drawn, in window coordinates.
+    pub bounds: Bounds<Pixels>,
+}
+
+/// Where a document drew the blocks it rendered.
+///
+/// Prose has no line numbers and no offsets a caller can point at, so there is
+/// no way from outside to ask how far down the page a heading ended up. Only
+/// the renderer knows, and only once the frame has been laid out. A caller that
+/// keeps a [`TextAnchors`] is handed, after every frame, the source offset and
+/// the drawn rectangle of every top-level block — which is what an outline
+/// needs both to scroll to a heading and to say which heading the reader is
+/// under.
+///
+/// The list is rebuilt on every frame the document is painted for, in document
+/// order. A document that sets no anchors records nothing and costs nothing.
+///
+/// Cheap to clone: every clone reads and writes the same list.
+#[derive(Clone, Default)]
+pub struct TextAnchors(Arc<Mutex<Vec<TextAnchor>>>);
+
+impl std::fmt::Debug for TextAnchors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TextAnchors").field(&self.get()).finish()
+    }
+}
+
+impl TextAnchors {
+    /// Every block the last painted frame drew, in document order.
+    pub fn get(&self) -> Vec<TextAnchor> {
+        self.0.lock().map(|found| found.clone()).unwrap_or_default()
+    }
+
+    /// Start again, at the top of the document.
+    pub(crate) fn begin(&self) {
+        if let Ok(mut found) = self.0.lock() {
+            found.clear();
+        }
+    }
+
+    /// Note that the block beginning at `source` was drawn at `bounds`.
+    pub(crate) fn record(&self, source: usize, bounds: Bounds<Pixels>) {
+        if let Ok(mut found) = self.0.lock() {
+            found.push(TextAnchor { source, bounds });
+        }
+    }
+}
+
 impl TextSearch {
     /// Look for `query`, painting every occurrence in `background`.
     pub fn new(query: impl Into<SharedString>, background: Hsla) -> Self {
@@ -217,6 +270,11 @@ pub struct TextViewStyle {
     /// `None`, the default, paints nothing and costs nothing. See
     /// [`TextSearch`].
     pub search: Option<TextSearch>,
+    /// Where to report the drawn position of each top-level block, if anywhere.
+    ///
+    /// `None`, the default, records nothing and costs nothing. See
+    /// [`TextAnchors`].
+    pub anchors: Option<TextAnchors>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
     /// Base font size for headings, default is 14px.
@@ -255,11 +313,11 @@ pub struct TextViewStyle {
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
-        // `marked_ranges` and `search` are deliberately left out: this
-        // comparison is what bumps the selection revision, and neither of them
-        // changes a single character of the text a selection is taken from.
-        // The find bar changes its query on every keystroke, and a reader's
-        // selection must survive that.
+        // `marked_ranges`, `search` and `anchors` are deliberately left out:
+        // this comparison is what bumps the selection revision, and none of
+        // them changes a single character of the text a selection is taken
+        // from. The find bar changes its query on every keystroke, and a
+        // reader's selection must survive that.
         self.image_base == other.image_base
             && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
@@ -286,6 +344,7 @@ impl Default for TextViewStyle {
             image_base: None,
             marked_ranges: Arc::new(Vec::new()),
             search: None,
+            anchors: None,
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,

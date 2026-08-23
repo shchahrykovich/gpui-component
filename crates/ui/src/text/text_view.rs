@@ -215,6 +215,18 @@ impl TextView {
         self
     }
 
+    /// Report where this document draws each of its top-level blocks.
+    ///
+    /// Prose has no line numbers, so a caller cannot work out for itself how
+    /// far down the page a heading ended up — only the renderer knows, and only
+    /// once the frame is laid out. The answers land in `anchors` after every
+    /// frame, which is what an outline needs to scroll to a heading and to say
+    /// which heading the reader is under. See [`TextAnchors`].
+    pub fn anchors(mut self, anchors: crate::text::TextAnchors) -> Self {
+        self.text_view_style.anchors = Some(anchors);
+        self
+    }
+
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;

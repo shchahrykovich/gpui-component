@@ -573,6 +573,12 @@ impl Render for TextViewState {
         if let Some(search) = &node_cx.style.search {
             search.results.begin();
         }
+        // The same for the blocks themselves. Every frame draws all of them, so
+        // every frame says afresh where they went rather than adding to what
+        // the frame before it found.
+        if let Some(anchors) = &node_cx.style.anchors {
+            anchors.begin();
+        }
 
         v_flex()
             .size_full()
