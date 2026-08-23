@@ -20,7 +20,8 @@ use crate::{
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
     text::{
-        CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode, TableActionsFn,
+        CodeBlockActionsFn, ImageClickHandlerFn, LinkClickHandlerFn, MarkdownExtensions,
+        MarkdownNode, TableActionsFn,
         document::NodeRenderOptions,
         inline::{Inline, InlineState},
         inline_flow::{InlineFlow, InlineFlowItem},
@@ -1365,6 +1366,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    pub(crate) image_click_handler: Option<Arc<ImageClickHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -1394,6 +1396,7 @@ impl Paragraph {
                 node_cx.link_click_handler.clone(),
                 node_cx.style.image_base.clone(),
             )
+            .on_image_click(node_cx.image_click_handler.clone())
             .search(node_cx.style.search.clone())
             .into_any_element();
         }
@@ -1437,6 +1440,15 @@ impl Paragraph {
                     .object_fit(ObjectFit::Contain)
                     .max_w(relative(1.))
                     .when_some(image.width, |this, width| this.w(width))
+                    // Appended rather than replacing the link handler below, so
+                    // an image inside a link answers both and each decides for
+                    // itself which clicks it wants.
+                    .when_some(node_cx.image_click_handler.clone(), |this, handler| {
+                        let url: SharedString = image.url.to_string().into();
+                        this.on_click(move |event, window, cx| {
+                            handler(&url, event, window, cx);
+                        })
+                    })
                     .when_some(image.link.clone(), |this, link| {
                         let title = image.title();
                         let link_click_handler = link_click_handler.clone();

@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::{
-    text::text_view::{LinkClickHandlerFn, handle_link_click},
+    text::text_view::{ImageClickHandlerFn, LinkClickHandlerFn, handle_link_click},
     tooltip::Tooltip,
 };
 
@@ -29,6 +29,9 @@ pub(super) struct InlineFlow {
     id: ElementId,
     items: Vec<InlineFlowItem>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    /// What a click on one of this flow's images is offered to, if anything.
+    /// See [`super::TextView::on_image_click`].
+    image_click_handler: Option<Arc<ImageClickHandlerFn>>,
     /// Where this document's own image paths are read from, if anywhere.
     /// See [`super::TextViewStyle::image_base`].
     image_base: Option<Arc<std::path::Path>>,
@@ -121,9 +124,19 @@ impl InlineFlow {
             id: id.into(),
             items,
             link_click_handler,
+            image_click_handler: None,
             image_base,
             search: None,
         }
+    }
+
+    /// What a click on one of this flow's images is offered to.
+    ///
+    /// A flow with no handler leaves its images exactly as they were: a plain
+    /// one answers nothing, and a linked one follows its link.
+    pub(super) fn on_image_click(mut self, handler: Option<Arc<ImageClickHandlerFn>>) -> Self {
+        self.image_click_handler = handler;
+        self
     }
 
     /// What a find bar is looking for, passed on to every run this flow lays
@@ -146,6 +159,7 @@ impl InlineFlow {
         title: &str,
         size: Size<Pixels>,
         link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+        image_click_handler: Option<Arc<ImageClickHandlerFn>>,
         image_base: Option<&std::path::Path>,
     ) -> AnyElement {
         img(image_source(url, image_base))
@@ -154,6 +168,15 @@ impl InlineFlow {
             .max_w(relative(1.))
             .w(size.width)
             .h(size.height)
+            // Appended rather than replacing the link handler below, so an
+            // image inside a link answers both and each decides for itself
+            // which clicks it wants.
+            .when_some(image_click_handler, |this, handler| {
+                let url: SharedString = url.to_string().into();
+                this.on_click(move |event, window, cx| {
+                    handler(&url, event, window, cx);
+                })
+            })
             .when_some(link.clone(), |this, link| {
                 let title = title.to_string();
                 let aux_link = link.clone();
@@ -347,6 +370,7 @@ impl Element for InlineFlow {
                         title.as_str(),
                         fragment_size,
                         self.link_click_handler.clone(),
+                        self.image_click_handler.clone(),
                         self.image_base.as_deref(),
                     );
                     element.prepaint_as_root(

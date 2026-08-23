@@ -26,6 +26,14 @@ pub(crate) type TableActionsFn =
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
 
+/// Type for the handler called when a rendered image is clicked.
+///
+/// It is handed the image's URL exactly as the document wrote it, and the click
+/// that reached it — so a caller that only wants a double click reads
+/// `click_count` on the event and ignores the rest.
+pub(crate) type ImageClickHandlerFn =
+    dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
+
 pub(crate) fn handle_link_click(
     handler: &Option<Arc<LinkClickHandlerFn>>,
     url: SharedString,
@@ -76,6 +84,7 @@ pub struct TextView {
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    image_click_handler: Option<Arc<ImageClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -118,6 +127,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -137,6 +147,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -156,6 +167,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -277,6 +289,24 @@ impl TextView {
         self
     }
 
+    /// Handle clicks on the images this document renders.
+    ///
+    /// The handler receives the image's URL as the document wrote it — the same
+    /// string [`image_base`](Self::image_base) resolves against — and the click
+    /// itself, so a caller wanting only a double click can read `click_count`.
+    ///
+    /// This is separate from [`on_link_click`](Self::on_link_click), and an
+    /// image wrapped in a link offers the click to both. Without a handler an
+    /// image answers a click exactly as it always has: a plain one does
+    /// nothing, and a linked one follows its link.
+    pub fn on_image_click<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
+    {
+        self.image_click_handler = Some(Arc::new(handler));
+        self
+    }
+
     /// Replace the Markdown extension registry.
     pub fn markdown_extensions(mut self, extensions: MarkdownExtensions) -> Self {
         self.markdown_extensions = Arc::new(extensions);
@@ -392,6 +422,7 @@ impl Element for TextView {
             state.code_block_actions = self.code_block_actions.clone();
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
+            state.image_click_handler = self.image_click_handler.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
