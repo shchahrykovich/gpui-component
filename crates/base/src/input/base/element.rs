@@ -1305,10 +1305,17 @@ impl<M: InputModeKind> TextElement<M> {
         cx: &mut App,
     ) {
         let is_hovered = fold_icon_layout.line_number_hitbox.is_hovered(window);
-        for (display_row, is_folded, icon) in fold_icon_layout.icons.iter_mut() {
+        for (display_row, _is_folded, icon) in fold_icon_layout.icons.iter_mut() {
             let is_current_line = current_row == Some(*display_row);
 
-            if !is_hovered && !is_current_line && !*is_folded {
+            // A closed fold used to keep its chevron on screen at all times,
+            // because the chevron was the only thing saying the fold was
+            // there. The ellipsis in the number column says it now, and says
+            // it better, so the chevron goes back to being what it is for
+            // everywhere else: the control, shown when the pointer is over the
+            // gutter and reaching for it. A mark and a control sitting side by
+            // side, both permanent, read as two columns.
+            if !is_hovered && !is_current_line {
                 continue;
             }
 
@@ -2004,22 +2011,26 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
             let mut line_numbers = Vec::with_capacity(last_layout.visible_buffer_lines.len());
-            let other_line_runs = vec![TextRun {
-                len: line_number_len,
-                font: style.font(),
-                color: state.editor_style.muted_foreground,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
-            let current_line_runs = vec![TextRun {
-                len: line_number_len,
-                font: style.font(),
-                color: state.editor_style.foreground,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
+            // Built per row rather than once, because `TextRun::len` counts
+            // **bytes** while the column is `line_number_len` *characters*
+            // wide. Every digit is one byte and the two agreed for as long as
+            // the column only ever held digits; the ellipsis below is three,
+            // and a run claiming five bytes of a seven-byte string slices
+            // through the middle of it.
+            let run_for = |text: &str, current: bool| {
+                vec![TextRun {
+                    len: text.len(),
+                    font: style.font(),
+                    color: if current {
+                        state.editor_style.foreground
+                    } else {
+                        state.editor_style.muted_foreground
+                    },
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }]
+            };
 
             // build line numbers
             for (line, &buffer_line) in last_layout
@@ -2027,14 +2038,20 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 .iter()
                 .zip(last_layout.visible_buffer_lines.iter())
             {
-                let line_no: SharedString =
-                    format!("{:>width$}", buffer_line + 1, width = line_number_len).into();
-
-                let runs = if current_row == Some(buffer_line) {
-                    &current_line_runs
+                // A row that begins a closed fold shows an ellipsis in place
+                // of its number. It is the only mark that says content is
+                // missing *here*, and it belongs in the number column because
+                // that column is what the reader is already scanning to see
+                // how far the page has jumped: `1  2  …  100  101  …  200`.
+                // Its own text is still drawn beside it, and the chevron
+                // beside that still opens the fold.
+                let line_no: SharedString = if state.display_map.is_folded_at(buffer_line) {
+                    format!("{:>width$}", "…", width = line_number_len).into()
                 } else {
-                    &other_line_runs
+                    format!("{:>width$}", buffer_line + 1, width = line_number_len).into()
                 };
+
+                let runs = run_for(&line_no, current_row == Some(buffer_line));
 
                 let mut sub_lines: SmallVec<[ShapedLine; 1]> = SmallVec::new();
                 sub_lines.push(

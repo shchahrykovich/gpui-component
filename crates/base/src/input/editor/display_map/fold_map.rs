@@ -160,8 +160,15 @@ impl FoldMap {
     /// Set a fold at the given start_line (must be in candidates)
     pub(super) fn set_folded(&mut self, start_line: usize, folded: bool) {
         if folded {
-            // Find the candidate range for this start_line
-            if let Some(candidate) = self.candidates.iter().find(|c| c.start_line == start_line) {
+            // Find the range for this start_line, among the candidates or the
+            // pinned ones. Both, because a pinned fold the reader opened by
+            // hand has to be closable again by the same chevron.
+            if let Some(candidate) = self
+                .candidates
+                .iter()
+                .chain(self.pinned.iter())
+                .find(|range| range.start_line == start_line)
+            {
                 // Add to folded if not already present
                 if !self.folded.iter().any(|f| f.start_line == start_line) {
                     self.folded.push(*candidate);
@@ -216,7 +223,14 @@ impl FoldMap {
 
     /// Check if a line is a fold candidate
     pub(super) fn is_fold_candidate(&self, start_line: usize) -> bool {
-        self.candidates.iter().any(|c| c.start_line == start_line)
+        // A pinned range counts, so the gutter draws a chevron on it and a
+        // click reaches `toggle_fold`. A fold the reader can neither see nor
+        // reopen is half a fold: the lines are gone from the page with nothing
+        // to say they were ever there.
+        self.candidates
+            .iter()
+            .chain(self.pinned.iter())
+            .any(|range| range.start_line == start_line)
     }
 
     /// Get all fold candidates
