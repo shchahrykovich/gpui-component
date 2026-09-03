@@ -26,6 +26,8 @@ mod display_map;
 mod editor;
 #[path = "base/element.rs"]
 mod element;
+#[path = "editor/folded_ranges.rs"]
+mod folded_ranges;
 #[path = "editor/gutter_marks.rs"]
 mod gutter_marks;
 #[path = "editor/highlighting.rs"]

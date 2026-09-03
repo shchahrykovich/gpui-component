@@ -140,6 +140,17 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
+    /// Fold exactly these ranges, whatever the candidates say.
+    ///
+    /// Unlike [`Self::set_folded`], the ranges need not be fold candidates and
+    /// they survive a later [`Self::set_fold_candidates`] — so a caller folding
+    /// something the syntax tree has no opinion about keeps its folds when the
+    /// file is highlighted again.
+    pub fn set_pinned_folds(&mut self, ranges: Vec<FoldRange>) {
+        self.fold_map.set_pinned(ranges);
+        self.rebuild_fold_projection();
+    }
+
     /// Toggle fold at the given start_line
     pub fn toggle_fold(&mut self, start_line: usize) {
         self.fold_map.toggle_fold(start_line);

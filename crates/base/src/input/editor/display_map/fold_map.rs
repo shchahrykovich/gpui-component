@@ -25,6 +25,16 @@ pub(super) struct FoldMap {
     /// Subset of candidates, sorted by start_line
     folded: Vec<FoldRange>,
 
+    /// Folds a caller asked for by range rather than by picking a candidate.
+    ///
+    /// They are kept beside `folded` for one reason: `set_candidates` drops
+    /// every fold the new candidates do not name, and the candidates are
+    /// rebuilt from the syntax tree on every reparse. A caller folding
+    /// something the grammar has no opinion about — the lines a diff says are
+    /// unchanged, say — would otherwise have its folds thrown away the moment
+    /// the file was highlighted again.
+    pinned: Vec<FoldRange>,
+
     /// Flag indicating if the fold projection needs rebuilding
     /// Used for lazy evaluation to avoid expensive rebuilds on every text change
     needs_rebuild: bool,
@@ -41,6 +51,7 @@ impl FoldMap {
             wrap_row_to_display_row: Vec::new(),
             candidates: Vec::new(),
             folded: Vec::new(),
+            pinned: Vec::new(),
             needs_rebuild: true,
             cached_wrap_row_count: 0,
         }
@@ -112,11 +123,16 @@ impl FoldMap {
         candidates.dedup_by_key(|r| r.start_line);
         self.candidates = candidates;
 
-        // Remove any folded ranges that are no longer in candidates
+        // Remove any folded ranges that are no longer in candidates. A pinned
+        // fold is kept: it was never a candidate, so judging it by the
+        // candidates would drop it on the next reparse.
+        let pinned = &self.pinned;
         self.folded.retain(|fold| {
-            self.candidates
-                .iter()
-                .any(|c| c.start_line == fold.start_line)
+            pinned.iter().any(|p| p.start_line == fold.start_line)
+                || self
+                    .candidates
+                    .iter()
+                    .any(|c| c.start_line == fold.start_line)
         });
     }
 
@@ -158,6 +174,33 @@ impl FoldMap {
             self.folded.retain(|f| f.start_line != start_line);
             self.needs_rebuild = true;
         }
+    }
+
+    /// Replace the folds a caller pinned, leaving the ones it chose from the
+    /// candidates alone.
+    ///
+    /// Passing an empty list unfolds everything this caller pinned and nothing
+    /// else, which is what makes it the exact undo of a call that pinned some.
+    pub(super) fn set_pinned(&mut self, mut ranges: Vec<FoldRange>) {
+        for old in std::mem::take(&mut self.pinned) {
+            self.folded.retain(|fold| fold.start_line != old.start_line);
+        }
+
+        ranges.sort_by_key(|range| range.start_line);
+        ranges.dedup_by_key(|range| range.start_line);
+        for range in &ranges {
+            if !self
+                .folded
+                .iter()
+                .any(|fold| fold.start_line == range.start_line)
+            {
+                self.folded.push(*range);
+            }
+        }
+        self.folded.sort_by_key(|range| range.start_line);
+
+        self.pinned = ranges;
+        self.needs_rebuild = true;
     }
 
     /// Toggle fold at the given start_line
