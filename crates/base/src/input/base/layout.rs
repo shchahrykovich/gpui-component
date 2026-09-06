@@ -15,6 +15,9 @@ pub(super) struct LastLayout {
     pub(super) visible_range: Range<usize>,
     pub(super) visible_buffer_lines: Vec<usize>,
     pub(super) visible_line_byte_offsets: Vec<usize>,
+    /// Rows of the phantom block sitting above each visible line, parallel to
+    /// `visible_buffer_lines`. Zero where there is no block.
+    pub(super) phantom_rows: Vec<usize>,
     pub(super) visible_top: Pixels,
     pub(super) visible_range_offset: Range<usize>,
     pub(super) lines: Rc<Vec<LineLayout>>,
@@ -31,6 +34,15 @@ impl LastLayout {
     pub(crate) fn line(&self, row: usize) -> Option<&LineLayout> {
         let pos = self.visible_buffer_lines.binary_search(&row).ok()?;
         self.lines.get(pos)
+    }
+
+    /// The height the phantom block above visible line `vi` takes.
+    ///
+    /// Every walk over the visible lines adds this before drawing the line, so
+    /// the block is drawn in the space it made and everything under it moves
+    /// down by the same amount.
+    pub(super) fn phantom_height(&self, vi: usize) -> Pixels {
+        self.line_height * self.phantom_rows.get(vi).copied().unwrap_or(0)
     }
 
     pub(super) fn alignment_offset(&self, line_width: Pixels) -> Pixels {

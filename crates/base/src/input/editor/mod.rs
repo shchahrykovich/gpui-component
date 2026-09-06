@@ -213,6 +213,10 @@ impl crate::input::InputExtras for super::EditorExtras {
         &self.gutter_marks
     }
 
+    fn phantom_lines(&self) -> &[super::PhantomLines] {
+        &self.phantom_lines
+    }
+
     fn semantic_token_styles(
         &self,
         text: &ropey::Rope,

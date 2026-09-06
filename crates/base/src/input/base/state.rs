@@ -784,6 +784,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let mut y_offset = last_layout.visible_top;
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            y_offset += last_layout.phantom_height(vi);
             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
             let local_offset = offset.saturating_sub(prev_lines_offset);
             if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
@@ -1830,8 +1831,12 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let row = point.row;
 
-        // Calculate row offset by multiplying the number of lines before it with the line height
-        let mut row_offset_y = line_height * self.display_map.buffer_line_to_display_row(row);
+        // Calculate row offset by multiplying the number of lines before it with
+        // the line height, plus the phantom rows drawn above it.
+        let mut row_offset_y = line_height
+            * (self.display_map.buffer_line_to_display_row(row)
+                + self.phantom_rows_before(row)
+                + self.phantom_rows_at(row));
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursor, so shifting the text here would cause a first-click visual jump.
@@ -2121,6 +2126,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             .zip(last_layout.visible_buffer_lines.iter())
             .enumerate()
         {
+            // A click inside a phantom block is a click on the line under it:
+            // the block holds no text the caret can be put in.
+            y_offset += last_layout.phantom_height(vi);
             let line_start_offset = last_layout.visible_line_byte_offsets[vi];
 
             // Calculate line origin for this display row
@@ -2910,6 +2918,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                 break;
             }
 
+            y_offset += last_layout.phantom_height(vi);
             let index_offset = last_layout.visible_line_byte_offsets[vi];
 
             if start_origin.is_none() {

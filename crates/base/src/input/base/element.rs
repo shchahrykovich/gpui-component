@@ -1,4 +1,4 @@
-use crate::input::{GutterMark, GutterMarkShape, InputExtras as _, InputModeKind};
+use crate::input::{GutterMark, GutterMarkShape, InputExtras as _, InputModeKind, PhantomLines};
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
@@ -409,6 +409,60 @@ fn empty_bottom_height(
 }
 
 /// Layout information for fold icons.
+/// A phantom block, shaped and ready to paint.
+///
+/// See [`crate::input::PhantomLines`]: the block draws lines the buffer does not
+/// hold, above the row it names.
+struct PhantomBlockLayout {
+    lines: Vec<ShapedLine>,
+    background: Option<Hsla>,
+    mark: Option<Hsla>,
+}
+
+impl PhantomBlockLayout {
+    fn height(&self, line_height: Pixels) -> Pixels {
+        line_height * self.lines.len()
+    }
+}
+
+/// Shape one phantom block's lines. An empty line is shaped as a space, or it
+/// would take no height at all.
+fn layout_phantom_block(
+    block: &PhantomLines,
+    style: &TextStyle,
+    font_size: Pixels,
+    window: &mut Window,
+) -> PhantomBlockLayout {
+    let lines = block
+        .lines
+        .iter()
+        .map(|line| {
+            let text: SharedString = if line.is_empty() {
+                " ".into()
+            } else {
+                line.clone()
+            };
+            let run = TextRun {
+                len: text.len(),
+                font: style.font(),
+                color: block.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_line(text, font_size, &[run], None)
+        })
+        .collect();
+
+    PhantomBlockLayout {
+        lines,
+        background: block.background,
+        mark: block.mark,
+    }
+}
+
 struct FoldIconLayout {
     /// Hitbox for the line number area (used for hover detection)
     line_number_hitbox: Hitbox,
@@ -518,8 +572,12 @@ impl<M: InputModeKind> TextElement<M> {
         // Resolve a cursor or selection endpoint to a content-space position.
         let visible_buffer_lines = &last_layout.visible_buffer_lines;
         let caret_for = |row: usize, offset: usize, affinity: bool| -> Point<Pixels> {
-            // y of the top of buffer line `row` in content space.
-            let top = line_height * state.display_map.buffer_line_to_display_row(row);
+            // y of the top of buffer line `row` in content space, below any
+            // phantom block sitting on it.
+            let top = line_height
+                * (state.display_map.buffer_line_to_display_row(row)
+                    + state.phantom_rows_before(row)
+                    + state.phantom_rows_at(row));
             let line_origin = point(px(0.), top);
 
             if let Some(vi) = visible_buffer_lines.iter().position(|&bl| bl == row) {
@@ -676,11 +734,13 @@ impl<M: InputModeKind> TextElement<M> {
         let mut line_corners = vec![];
 
         // Iterate only over visible (non-hidden) buffer lines
-        for (prev_lines_offset, line) in last_layout
+        for (vi, (prev_lines_offset, line)) in last_layout
             .visible_line_byte_offsets
             .iter()
             .zip(lines.iter())
+            .enumerate()
         {
+            offset_y += last_layout.phantom_height(vi);
             let prev_lines_offset = *prev_lines_offset;
             let line_size = line.size(line_height);
             let line_wrap_width = line_size.width;
@@ -898,18 +958,18 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         line_height: Pixels,
         input_height: Pixels,
-    ) -> (Range<usize>, Vec<usize>, Pixels) {
+    ) -> (Range<usize>, Vec<usize>, Vec<usize>, Pixels) {
         // Add extra rows to avoid showing empty space when scroll to bottom.
         let extra_rows = 1;
         if state.is_single_line() {
-            return (0..1, vec![0], px(0.));
+            return (0..1, vec![0], vec![0], px(0.));
         }
 
         let total_lines = state.display_map.wrap_row_count();
         let display_count = state.display_map.display_row_count();
         let buffer_line_count = state.display_map.buffer_line_count();
         if display_count == 0 || buffer_line_count == 0 {
-            return (0..0, Vec::new(), px(0.));
+            return (0..0, Vec::new(), Vec::new(), px(0.));
         }
 
         let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
@@ -924,39 +984,50 @@ impl<M: InputModeKind> TextElement<M> {
             input_height,
         );
 
-        // Display rows are uniformly `line_height` tall, so the visible window maps
-        // directly to a display-row range.
+        // Every row on screen is `line_height` tall, display rows and phantom
+        // rows alike, so the visible window maps to a range of *visual* rows and
+        // `display_row_at_visual_row` says which display row is drawn at each.
         let viewport_top = (-scroll_top).max(px(0.));
         let viewport_bottom = viewport_top + input_height;
         let line_height_f = f32::from(line_height);
-        let first_display =
-            ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
-        let last_display =
-            ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
+        let first_display = state
+            .display_row_at_visual_row((f32::from(viewport_top) / line_height_f).floor() as usize);
+        let last_display = state
+            .display_row_at_visual_row((f32::from(viewport_bottom) / line_height_f).ceil() as usize);
 
         let start_line = state.display_map.display_row_to_buffer_line(first_display);
         let end_line = state.display_map.display_row_to_buffer_line(last_display);
 
         // y of the top of the first visible buffer line (in content space).
+        // That is the top of its phantom block when it has one, because every
+        // walk over the visible lines draws the block before the line.
+        let phantom_before = state.phantom_rows_before(start_line);
         let visible_top = match state
             .display_map
             .buffer_line_to_display_row_range(start_line)
         {
-            Some(range) => line_height * range.start,
-            None => line_height * first_display,
+            Some(range) => line_height * (range.start + phantom_before),
+            None => line_height * (first_display + phantom_before),
         };
 
         let visible_range = start_line..(end_line + 1 + extra_rows).min(buffer_line_count);
 
         // Collect non-hidden buffer lines within the visible range
         let mut visible_buffer_lines = Vec::with_capacity(visible_range.len());
+        let mut phantom_rows = Vec::with_capacity(visible_range.len());
         for ix in visible_range.clone() {
             if state.display_map.visible_wrap_row_count_for_buffer_line(ix) > 0 {
                 visible_buffer_lines.push(ix);
+                phantom_rows.push(state.phantom_rows_at(ix));
             }
         }
 
-        (visible_range, visible_buffer_lines, visible_top)
+        (
+            visible_range,
+            visible_buffer_lines,
+            phantom_rows,
+            visible_top,
+        )
     }
 
     /// Return (line_number_width, line_number_len)
@@ -1185,11 +1256,13 @@ impl<M: InputModeKind> TextElement<M> {
             let mut infos = Vec::with_capacity(last_layout.visible_buffer_lines.len());
             let mut offset_y = last_layout.visible_top;
 
-            for (line, &buffer_line) in last_layout
+            for (vi, (line, &buffer_line)) in last_layout
                 .lines
                 .iter()
                 .zip(last_layout.visible_buffer_lines.iter())
+                .enumerate()
             {
+                offset_y += last_layout.phantom_height(vi);
                 if state.display_map.is_fold_candidate(buffer_line) {
                     let is_folded = state.display_map.is_folded_at(buffer_line);
                     infos.push(FoldInfo {
@@ -1596,6 +1669,13 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
+    /// The phantom block above each visible line, parallel to
+    /// `last_layout.visible_buffer_lines`.
+    phantom_blocks: Vec<Option<PhantomBlockLayout>>,
+    /// The block past the last line of the buffer, for lines taken from the end
+    /// of the file. It has no visible line to hang from, so it is painted after
+    /// the walk rather than inside it.
+    phantom_tail: Option<PhantomBlockLayout>,
     // Inline completion rendering data
     /// Shaped ghost lines to paint after cursor row (completion lines 2+)
     ghost_lines: Vec<ShapedLine>,
@@ -1771,7 +1851,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let state = self.state.read(cx);
         let line_height = window.line_height();
 
-        let (visible_range, visible_buffer_lines, visible_top) =
+        let (visible_range, visible_buffer_lines, phantom_rows, visible_top) =
             self.calculate_visible_range(&state, line_height, bounds.size.height);
         let visible_start_offset = state.text.line_start_offset(visible_range.start);
         let visible_end_offset = state
@@ -1813,6 +1893,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,
+            phantom_rows,
             visible_top,
             visible_range_offset,
             line_height,
@@ -1933,7 +2014,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let ghost_line_count = ghost_lines.len();
         let ghost_lines_height = ghost_line_count as f32 * line_height;
 
-        let total_wrapped_lines = state.display_map.wrap_row_count();
+        // Phantom rows are drawn at one row's height each, so they lengthen the
+        // page exactly as a real line does.
+        let total_wrapped_lines = state.display_map.wrap_row_count() + state.phantom_rows_total();
         let empty_bottom_height = empty_bottom_height(
             state.is_code_editor(),
             state.scroll_beyond_last_line,
@@ -2069,6 +2152,33 @@ impl<M: InputModeKind> Element for TextElement<M> {
             None
         };
 
+        // Shape the phantom blocks the frame can reach. `phantom_rows` in the
+        // layout already made room for exactly these.
+        let (phantom_blocks, phantom_tail) = {
+            let blocks: Vec<Option<PhantomBlockLayout>> = last_layout
+                .visible_buffer_lines
+                .iter()
+                .map(|&buffer_line| {
+                    state
+                        .phantom_block_at(buffer_line)
+                        .map(|block| layout_phantom_block(block, &text_style, text_size, window))
+                })
+                .collect();
+
+            let buffer_line_count = state.display_map.buffer_line_count();
+            let reaches_the_end = last_layout
+                .visible_buffer_lines
+                .last()
+                .is_some_and(|&line| line + 1 >= buffer_line_count);
+            let tail = reaches_the_end
+                .then(|| state.phantom_block_at(buffer_line_count))
+                .flatten()
+                .map(|block| layout_phantom_block(block, &text_style, text_size, window));
+
+            (blocks, tail)
+        };
+
+        let state = self.state.read(cx);
         let hover_definition_hitbox = M::hover_definition_hitbox(state, window, cx);
         let indent_guides_path =
             self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
@@ -2099,6 +2209,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             document_color_paths,
             indent_guides_path,
             fold_icon_layout,
+            phantom_blocks,
+            phantom_tail,
             ghost_first_line,
             ghost_lines,
             ghost_lines_height,
@@ -2156,10 +2268,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
             offset_y += invisible_top_padding;
 
             // Each item is the normal lines.
-            for (lines, &buffer_line) in line_numbers
+            for (vi, (lines, &buffer_line)) in line_numbers
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
+                .enumerate()
             {
+                // A phantom block above this line takes its rows before the
+                // line's own background is drawn.
+                offset_y += prepaint.last_layout.phantom_height(vi);
                 let is_active = prepaint.current_row == Some(buffer_line);
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let height = line_height * lines.len() as f32;
@@ -2230,12 +2346,32 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // Track the y-position of the cursor row for positioning the first line suffix
         let mut cursor_row_y = None;
 
-        for (line, &buffer_line) in prepaint
+        let phantom_x = origin.x + prepaint.last_layout.line_number_width + scroll_offset;
+
+        for (vi, (line, &buffer_line)) in prepaint
             .last_layout
             .lines
             .iter()
             .zip(prepaint.last_layout.visible_buffer_lines.iter())
+            .enumerate()
         {
+            // Lines the buffer does not hold, drawn in the space `phantom_rows`
+            // made for them above this line.
+            if let Some(block) = prepaint.phantom_blocks.get(vi).and_then(Option::as_ref) {
+                offset_y = paint_phantom_block(
+                    block,
+                    point(input_bounds.origin.x, origin.y),
+                    phantom_x,
+                    offset_y,
+                    bounds.size.width,
+                    line_height,
+                    text_align,
+                    prepaint.last_layout.content_width,
+                    window,
+                    cx,
+                );
+            }
+
             let row = buffer_line;
             let line_y = origin.y + offset_y;
             let p = point(
@@ -2289,6 +2425,23 @@ impl<M: InputModeKind> Element for TextElement<M> {
             }
         }
 
+        // Lines taken from the end of the file have no line under them to hang
+        // from, so their block is painted after the walk.
+        if let Some(block) = prepaint.phantom_tail.as_ref() {
+            paint_phantom_block(
+                block,
+                point(input_bounds.origin.x, origin.y),
+                phantom_x,
+                offset_y,
+                bounds.size.width,
+                line_height,
+                text_align,
+                prepaint.last_layout.content_width,
+                window,
+                cx,
+            );
+        }
+
         // Paint blinking cursor
         if focused && show_cursor {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
@@ -2337,10 +2490,25 @@ impl<M: InputModeKind> Element for TextElement<M> {
             };
 
             // Each item is the normal lines.
-            for (lines, &buffer_line) in line_numbers
+            for (vi, (lines, &buffer_line)) in line_numbers
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
+                .enumerate()
             {
+                // A phantom row wears no number: the blank column is what says
+                // the line is not in the file. Its own bar is what says what it
+                // is instead, and it covers the block's rows rather than the
+                // line under them.
+                if let Some(block) = prepaint.phantom_blocks.get(vi).and_then(Option::as_ref) {
+                    if let Some(color) = block.mark {
+                        let quad = Bounds::new(
+                            point(gutter_bounds.origin.x, origin.y + offset_y),
+                            size(GUTTER_MARK_WIDTH, block.height(line_height)),
+                        );
+                        window.paint_quad(fill(quad, color));
+                    }
+                }
+                offset_y += prepaint.last_layout.phantom_height(vi);
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let is_active = prepaint.current_row == Some(buffer_line);
 
@@ -2375,6 +2543,18 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 // Add ghost line height after cursor row for line numbers alignment
                 if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
                     offset_y += prepaint.ghost_lines_height;
+                }
+            }
+
+            // The block past the last line wears its bar here, for the same
+            // reason it is painted after the walk: no line hangs it.
+            if let Some(block) = prepaint.phantom_tail.as_ref() {
+                if let Some(color) = block.mark {
+                    let quad = Bounds::new(
+                        point(gutter_bounds.origin.x, origin.y + offset_y),
+                        size(GUTTER_MARK_WIDTH, block.height(line_height)),
+                    );
+                    window.paint_quad(fill(quad, color));
                 }
             }
         }
@@ -2425,6 +2605,41 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         self.paint_mouse_listeners(window, cx);
     }
+}
+
+/// Paint one phantom block, and answer the `offset_y` the line under it starts
+/// at. The wash spans the whole element; the gutter's own background is painted
+/// after the text, so the number column stays clean.
+#[allow(clippy::too_many_arguments)]
+fn paint_phantom_block(
+    block: &PhantomBlockLayout,
+    origin: Point<Pixels>,
+    text_x: Pixels,
+    offset_y: Pixels,
+    width: Pixels,
+    line_height: Pixels,
+    text_align: TextAlign,
+    content_width: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> Pixels {
+    let mut offset_y = offset_y;
+
+    if let Some(background) = block.background {
+        let bounds = Bounds::new(
+            point(origin.x, origin.y + offset_y),
+            size(width, block.height(line_height)),
+        );
+        window.paint_quad(fill(bounds, background));
+    }
+
+    for line in &block.lines {
+        let p = point(text_x, origin.y + offset_y);
+        _ = line.paint(p, line_height, text_align, Some(content_width), window, cx);
+        offset_y += line_height;
+    }
+
+    offset_y
 }
 
 /// Split placeholder text into display lines and trim runs to each line.

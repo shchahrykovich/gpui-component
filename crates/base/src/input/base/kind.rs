@@ -29,7 +29,7 @@ use ropey::Rope;
 use super::decorations::DecorationCollections;
 use super::lsp::{ContextMenuContent, HoverDefinition, InlineCompletion};
 use crate::input::{
-    GutterMark, HighlightStyleResolver, InputEdit, InputHighlighter, TextDecoration,
+    GutterMark, HighlightStyleResolver, InputEdit, InputHighlighter, PhantomLines, TextDecoration,
 };
 use crate::input::{HoverPopoverState, Lsp};
 use gpui::Task;
@@ -84,6 +84,11 @@ pub trait InputExtras: Default + 'static {
 
     /// Marks to paint in the gutter, beside the line numbers.
     fn gutter_marks(&self) -> &[GutterMark] {
+        &[]
+    }
+
+    /// Runs of lines to draw above a row without the buffer holding them.
+    fn phantom_lines(&self) -> &[PhantomLines] {
         &[]
     }
 
@@ -334,6 +339,7 @@ pub struct EditorExtras {
     pub(crate) lsp: Lsp,
     pub(crate) decorations: DecorationCollections,
     pub(crate) gutter_marks: Vec<GutterMark>,
+    pub(crate) phantom_lines: Vec<PhantomLines>,
     pub(crate) inline_completion: InlineCompletion,
     pub(crate) context_menu_content: ContextMenuContent,
     pub(crate) hover_popover: Option<HoverPopoverState>,
@@ -347,6 +353,7 @@ impl Default for EditorExtras {
             lsp: Lsp::default(),
             decorations: DecorationCollections::default(),
             gutter_marks: Vec::new(),
+            phantom_lines: Vec::new(),
             inline_completion: InlineCompletion::default(),
             context_menu_content: ContextMenuContent::default(),
             hover_popover: None,

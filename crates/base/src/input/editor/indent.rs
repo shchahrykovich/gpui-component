@@ -122,11 +122,13 @@ impl<M: InputModeKind> TextElement<M> {
         let mut offset_y = last_layout.visible_top;
         let mut last_indents = vec![];
 
-        for (&buffer_line, line_layout) in last_layout
+        for (vi, (&buffer_line, line_layout)) in last_layout
             .visible_buffer_lines
             .iter()
             .zip(last_layout.lines.iter())
+            .enumerate()
         {
+            offset_y += last_layout.phantom_height(vi);
             let line = state.text.slice_line(buffer_line);
             let mut current_indents = vec![];
             if line.len() > 0 {

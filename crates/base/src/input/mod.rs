@@ -43,6 +43,8 @@ mod layout;
 mod lsp;
 #[path = "base/mask_pattern.rs"]
 mod mask_pattern;
+#[path = "editor/phantom_lines.rs"]
+mod phantom_lines;
 #[path = "base/mode.rs"]
 mod mode;
 #[path = "base/movement.rs"]
@@ -92,6 +94,7 @@ pub use lsp::{
     ShowDocumentHandler,
 };
 pub use lsp_types::Position;
+pub use phantom_lines::PhantomLines;
 pub use mask_pattern::MaskPattern;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
