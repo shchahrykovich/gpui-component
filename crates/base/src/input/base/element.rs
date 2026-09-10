@@ -13,7 +13,7 @@ use gpui::{
 };
 use ropey::Rope;
 use smallvec::SmallVec;
-use std::{ops::Range, rc::Rc};
+use std::{borrow::Cow, ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
@@ -1410,12 +1410,11 @@ impl<M: InputModeKind> TextElement<M> {
         let is_single_line = state.is_single_line();
 
         if is_single_line {
-            let shaped_line = window.text_system().shape_line(
-                display_text.to_string().into(),
-                font_size,
-                &runs,
-                None,
-            );
+            let line: SharedString = display_text.to_string().into();
+            let runs = fit_runs_to_text(&line, runs);
+            let shaped_line = window
+                .text_system()
+                .shape_line(line, font_size, &runs, None);
 
             let line_layout = LineLayout::new()
                 .lines(smallvec::smallvec![shaped_line])
@@ -1429,6 +1428,7 @@ impl<M: InputModeKind> TextElement<M> {
             let mut placeholder_lines = SmallVec::new();
 
             for (line, line_runs) in placeholder_line_runs(&placeholder_text, runs) {
+                let line_runs = fit_runs_to_text(line, &line_runs);
                 let shaped_line = window.text_system().shape_line(
                     line.to_string().into(),
                     font_size,
@@ -1475,6 +1475,7 @@ impl<M: InputModeKind> TextElement<M> {
                 };
 
                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
+                let line_runs = fit_runs_to_text(&sub_line, &line_runs);
                 let shaped_line = window
                     .text_system()
                     .shape_line(sub_line, font_size, &line_runs, None);
@@ -2664,6 +2665,71 @@ fn placeholder_line_runs<'a>(
     result
 }
 
+/// Fits `runs` to `text`, so that the line can be shaped at all.
+///
+/// `shape_line` walks the runs and splits the line by each run's length, so
+/// every cumulative length has to be a char boundary of `text` and none of
+/// them may reach past its end. A boundary inside a multi-byte character
+/// **aborts the process** inside the platform text system instead of drawing
+/// the line, and every producer of these ranges — a syntax highlighter, a
+/// decoration layer, a diagnostic, an application colour — hands over byte
+/// offsets into a text that may have moved on since. A boundary that lands
+/// inside a character therefore moves up to the end of that character, and
+/// runs that start past the end of the text are dropped.
+///
+/// Returns `runs` borrowed and untouched when they already fit, which is what
+/// happens on every ordinary frame.
+fn fit_runs_to_text<'a>(text: &str, runs: &'a [TextRun]) -> Cow<'a, [TextRun]> {
+    let len = text.len();
+    let mut offset = 0usize;
+    let fits = runs.iter().all(|run| {
+        offset = offset.saturating_add(run.len);
+        offset <= len && text.is_char_boundary(offset)
+    });
+
+    if fits && offset == len {
+        return Cow::Borrowed(runs);
+    }
+
+    let mut fitted: Vec<TextRun> = Vec::with_capacity(runs.len());
+    let mut offset = 0usize;
+    for run in runs {
+        if offset >= len {
+            break;
+        }
+
+        let mut end = offset.saturating_add(run.len).min(len);
+        // `len` is a char boundary, so this stops.
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        if end == offset {
+            continue;
+        }
+
+        fitted.push(TextRun {
+            len: end - offset,
+            ..run.clone()
+        });
+        offset = end;
+    }
+
+    // The runs have to cover the whole line: whatever they leave uncovered is
+    // left out of the shaped line, and so out of the drawn text.
+    if offset < len {
+        match fitted.last_mut() {
+            Some(last) => last.len += len - offset,
+            None => {
+                if let Some(run) = runs.first() {
+                    fitted.push(TextRun { len, ..run.clone() });
+                }
+            }
+        }
+    }
+
+    Cow::Owned(fitted)
+}
+
 /// Get the runs for the given range.
 ///
 /// The range is the byte range of the wrapped line.
@@ -3157,6 +3223,73 @@ mod tests {
             .map(|(_, line_runs)| line_runs.iter().map(|run| run.len).collect::<Vec<_>>())
             .collect::<Vec<_>>();
         assert_eq!(run_lengths, vec![vec![2], vec![], vec![1]]);
+    }
+
+    #[test]
+    fn test_fit_runs_to_text() {
+        let run = TextRun {
+            len: 0,
+            font: gpui::font(".SystemUIFont"),
+            color: gpui::blue(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = |lengths: &[usize]| {
+            lengths
+                .iter()
+                .map(|&len| TextRun { len, ..run.clone() })
+                .collect::<Vec<_>>()
+        };
+        let lengths = |runs: &[TextRun]| runs.iter().map(|run| run.len).collect::<Vec<_>>();
+
+        // "// привет" — the comment ends on a two-byte character, so a
+        // highlighter one byte behind the text puts a boundary inside it.
+        let text = "// привет";
+        assert_eq!(text.len(), 15);
+
+        // Runs that already fit are handed back as they are.
+        let fitting = runs(&[3, 12]);
+        assert!(matches!(fit_runs_to_text(text, &fitting), Cow::Borrowed(_)));
+
+        // A boundary inside a character moves to the end of that character,
+        // and the run after it keeps the rest of the line. `3 + 9` really is
+        // inside the last character: this is the state that reached
+        // `shape_line` in the crash it was written for.
+        assert!(!text.is_char_boundary(3 + 9));
+        assert_eq!(
+            lengths(&fit_runs_to_text(text, &runs(&[3, 9, 3]))),
+            vec![3, 10, 2]
+        );
+
+        // Runs that reach past the end of the line are cut, and runs that
+        // start past it are dropped.
+        assert_eq!(
+            lengths(&fit_runs_to_text(text, &runs(&[3, 40, 5]))),
+            vec![3, 12]
+        );
+
+        // Runs that leave the tail of the line uncovered are extended, so
+        // that no part of the line is left out of the shaped line.
+        assert_eq!(
+            lengths(&fit_runs_to_text(text, &runs(&[3, 4]))),
+            vec![3, 12]
+        );
+
+        // Every case adds up to the length of the line.
+        for lens in [vec![3, 9, 3], vec![3, 40, 5], vec![3, 4], vec![1]] {
+            let given = runs(&lens);
+            let fitted = fit_runs_to_text(text, &given);
+            assert_eq!(fitted.iter().map(|run| run.len).sum::<usize>(), text.len());
+            let mut offset = 0;
+            for r in fitted.iter() {
+                offset += r.len;
+                assert!(text.is_char_boundary(offset), "{lens:?} broke a character");
+            }
+        }
+
+        // No runs at all stays no runs at all.
+        assert!(fit_runs_to_text(text, &[]).is_empty());
     }
 
     #[test]
