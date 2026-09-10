@@ -1037,6 +1037,18 @@ impl SyntaxHighlighter {
         highlights
     }
 
+    /// Widens `range` onto the nearest char boundaries of the text this
+    /// highlighter holds, and clamps it to the end of that text.
+    ///
+    /// The start moves down and the end moves up, so a range that covered
+    /// part of a character ends up covering the whole of it.
+    fn char_boundary_range(&self, range: Range<usize>) -> Range<usize> {
+        let len = self.text.len();
+        let start = self.text.floor_char_boundary(range.start.min(len));
+        let end = self.text.ceil_char_boundary(range.end.min(len));
+        start..end
+    }
+
     /// Returns the syntax highlight styles for a range of text.
     ///
     /// The argument `range` is the range of bytes in the text to highlight.
@@ -1081,6 +1093,20 @@ impl SyntaxHighlighter {
             if node_range.start > node_range.end {
                 node_range.end = node_range.start;
             }
+            if node_range.is_empty() {
+                continue;
+            }
+
+            // A node offset is only meaningful in the text the tree was
+            // parsed from. `update` deliberately keeps a stale tree when a
+            // parse times out, so a boundary here can land inside a
+            // multi-byte character of the text held now. The consumer turns
+            // these ranges into text run lengths and the platform text
+            // system splits the line by them, which aborts the process on a
+            // byte index that is not a char boundary. Snap every boundary
+            // onto a char boundary of the text these ranges are read
+            // against.
+            let node_range = self.char_boundary_range(node_range);
             if node_range.is_empty() {
                 continue;
             }
@@ -1462,6 +1488,54 @@ console.log(answer);
                 && range.end >= keyword_start + 2
                 && style.color == keyword_color
         }));
+    }
+
+    /// A parse that runs out of time leaves the old tree in place on purpose,
+    /// so that the reader keeps seeing colours while the new text is parsed in
+    /// the background. The offsets that tree reports are then offsets into a
+    /// text that is gone, and any of them can land inside a multi-byte
+    /// character of the text held now. The consumer turns these ranges into
+    /// text run lengths and the platform text system splits the line by them,
+    /// which aborts the process on a byte index that is not a char boundary —
+    /// so `styles` has to hand back boundaries the current text can be sliced
+    /// at, however stale the colours behind them are.
+    #[test]
+    #[cfg(feature = "tree-sitter-languages")]
+    fn test_stale_tree_styles_stay_on_char_boundaries() {
+        // The comment ends on a two-byte character, and the fenced block is
+        // highlighted by an injected Rust layer, which the timeout path leaves
+        // untouched. Padding lines make the parse long enough to time out.
+        fn markdown(prefix: &str) -> String {
+            let mut out = String::from(prefix);
+            out.push_str("# Title\n\n```rust\nfn main() {\n    // привет\n}\n```\n\n");
+            for i in 0..4000 {
+                out.push_str(&format!("Строка номер {i}.\n"));
+            }
+            out
+        }
+
+        let before = markdown("");
+        // One byte more at the front, so every offset the old tree reports is
+        // one byte short of the character it used to point at.
+        let after = markdown("x");
+
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        assert!(highlighter.update(None, &Rope::from_str(&before), None));
+
+        let completed =
+            highlighter.update(None, &Rope::from_str(&after), Some(Duration::from_nanos(0)));
+        assert!(!completed, "the parse should have run out of time");
+
+        let theme = HighlightTheme::default_dark();
+        let styles = highlighter.styles(&(0..after.len()), theme.as_ref());
+        assert!(!styles.is_empty());
+
+        for (range, _) in &styles {
+            assert!(
+                after.get(range.clone()).is_some(),
+                "style range {range:?} cannot be sliced out of the text"
+            );
+        }
     }
 
     #[test]
