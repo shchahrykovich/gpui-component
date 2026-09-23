@@ -42,6 +42,12 @@ pub struct Column {
     /// - The column and its cells cannot be selected
     /// - Useful for action columns (e.g., buttons, checkboxes) that shouldn't participate in selection
     pub selectable: bool,
+    /// Whether a click on a cell of this column selects the cell's row.
+    ///
+    /// Meant for a column of row numbers. A click selects the row, a
+    /// shift-click extends the selected rows to it, and a drag down the column
+    /// selects every row it passes over. Needs row selection to be on.
+    pub selects_row: bool,
     /// The minimum width of the column.
     pub min_width: Pixels,
     /// The maximum width of the column.
@@ -77,6 +83,7 @@ impl Default for Column {
             resizable: true,
             movable: true,
             selectable: true,
+            selects_row: false,
             min_width: px(20.0),
             max_width: px(f32::MAX),
         }
@@ -195,6 +202,13 @@ impl Column {
     /// ```
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
+        self
+    }
+
+    /// Set whether a click on a cell of this column selects the cell's row,
+    /// default is false. See [`Column::selects_row`].
+    pub fn selects_row(mut self, selects_row: bool) -> Self {
+        self.selects_row = selects_row;
         self
     }
 

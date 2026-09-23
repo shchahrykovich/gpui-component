@@ -14,9 +14,9 @@ use crate::{
 use gpui::{
     AnyElement, AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter,
     FocusHandle, Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
-    prelude::FluentBuilder, px, uniform_list,
+    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle,
+    Window, div, prelude::FluentBuilder, px, uniform_list,
 };
 
 use super::*;
@@ -66,6 +66,12 @@ pub enum TableEvent {
     DoubleClickedRow(usize),
     /// Selected column.
     SelectColumn(usize),
+    /// More than one row has been selected: the rows in the range, first to
+    /// last. One row alone is [`TableEvent::SelectRow`].
+    ///
+    /// Emitted as a shift-click, or a drag down a column that selects rows,
+    /// grows or shrinks the selection.
+    SelectRows(Range<usize>),
     /// A cell has been selected (clicked or navigated to via keyboard).
     ///
     /// Emitted when a cell is selected in cell selection mode.
@@ -239,6 +245,12 @@ pub struct TableState<D: TableDelegate> {
     pub horizontal_scroll_handle: VirtualListScrollHandle,
 
     selected_row: Option<usize>,
+    /// The other end of a range of selected rows. `selected_row` is the end
+    /// that moves; every row between the two, both included, is selected.
+    row_anchor: Option<usize>,
+    /// True from a press on a column that selects rows until the button is
+    /// released: each row the pointer passes over extends the selection.
+    dragging_rows: bool,
     /// The height of a body row, when it differs from the header's.
     row_height: Option<Pixels>,
     selection_mode: SelectionMode,
@@ -278,6 +290,8 @@ where
             vertical_scroll_handle: UniformListScrollHandle::new(),
             selection_mode: SelectionMode::Row,
             selected_row: None,
+            row_anchor: None,
+            dragging_rows: false,
             row_height: None,
             right_clicked_row: None,
             right_clicked_cell: None,
@@ -454,29 +468,122 @@ where
 
     /// Sets the selected row to the given index.
     pub fn set_selected_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.select_rows(row_ix, row_ix, cx);
+    }
+
+    /// Returns the selected rows, first to last. One selected row is a range
+    /// of one.
+    ///
+    /// Returns `None` when no row is selected, or when a column or a cell is.
+    pub fn selected_rows(&self) -> Option<Range<usize>> {
+        if !self.selection_mode.is_row() {
+            return None;
+        }
+        self.row_range()
+    }
+
+    /// Extends the selected rows from the row the selection started on to
+    /// `row_ix`, both included.
+    ///
+    /// A selected cell counts as its row, so a cell and then a shift-click
+    /// further down selects the rows in between. With nothing selected this
+    /// selects `row_ix` alone.
+    pub fn extend_selected_rows(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+        let anchor = match self.selection_mode {
+            SelectionMode::Row => self.row_anchor.or(self.selected_row),
+            SelectionMode::Cell => self.selected_cell.map(|(row, _)| row),
+            SelectionMode::Column => None,
+        };
+        self.select_rows(anchor.unwrap_or(row_ix), row_ix, cx);
+    }
+
+    /// Select every row from `anchor` to `head`, both included, and bring
+    /// `head` into view. Leaves the event's propagation alone, so that a press
+    /// that selects a row still gives the table the keyboard.
+    fn select_rows(&mut self, anchor: usize, head: usize, cx: &mut Context<Self>) {
         let is_down = match self.selected_row {
-            Some(selected_row) => row_ix > selected_row,
+            Some(selected_row) => head > selected_row,
             None => true,
         };
 
-        cx.stop_propagation();
         self.selection_mode = SelectionMode::Row;
         self.right_clicked_row = None;
         self.right_clicked_cell = None;
-        self.selected_row = Some(row_ix);
-        if let Some(row_ix) = self.selected_row {
-            self.vertical_scroll_handle.scroll_to_item(
-                row_ix,
-                if is_down {
-                    ScrollStrategy::Bottom
-                } else {
-                    ScrollStrategy::Top
-                },
-            );
+        self.selected_row = Some(head);
+        self.row_anchor = Some(anchor);
+        self.vertical_scroll_handle.scroll_to_item(
+            head,
+            if is_down {
+                ScrollStrategy::Bottom
+            } else {
+                ScrollStrategy::Top
+            },
+        );
+        if anchor == head {
+            cx.emit(TableEvent::SelectRow(head));
+        } else {
+            cx.emit(TableEvent::SelectRows(
+                anchor.min(head)..anchor.max(head) + 1,
+            ));
         }
-        cx.emit(TableEvent::SelectRow(row_ix));
         cx.emit(TableEvent::RightClickedRow(None));
         cx.notify();
+    }
+
+    /// The rows between the anchor and the moving end, whatever the
+    /// selection mode says.
+    fn row_range(&self) -> Option<Range<usize>> {
+        let head = self.selected_row?;
+        let anchor = self.row_anchor.unwrap_or(head);
+        Some(anchor.min(head)..anchor.max(head) + 1)
+    }
+
+    /// Whether `row_ix` is one of the selected rows.
+    fn is_row_selected(&self, row_ix: usize) -> bool {
+        self.row_range().is_some_and(|rows| rows.contains(&row_ix))
+    }
+
+    /// Whether a click on the cells of column `col_ix` selects their row.
+    fn col_selects_row(&self, col_ix: usize) -> bool {
+        self.row_selectable
+            && self
+                .col_groups
+                .get(col_ix)
+                .is_some_and(|group| group.column.selects_row)
+    }
+
+    /// A press on a column that selects rows: select the row, or extend the
+    /// selection to it with shift, and follow the pointer until release.
+    fn on_row_selector_mouse_down(
+        &mut self,
+        e: &MouseDownEvent,
+        row_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if e.modifiers.shift {
+            self.extend_selected_rows(row_ix, cx);
+        } else {
+            self.select_rows(row_ix, row_ix, cx);
+        }
+        self.dragging_rows = true;
+    }
+
+    /// The pointer moved over row `row_ix`. While a press on a column that
+    /// selects rows is held, the selection follows it.
+    fn on_row_mouse_move(&mut self, e: &MouseMoveEvent, row_ix: usize, cx: &mut Context<Self>) {
+        if !self.dragging_rows {
+            return;
+        }
+        // The release can land anywhere, even outside the window, so the
+        // drag is over the first time the pointer moves with no button held.
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.dragging_rows = false;
+            return;
+        }
+        if self.selected_row != Some(row_ix) {
+            self.extend_selected_rows(row_ix, cx);
+        }
     }
 
     /// Returns the row that has been right clicked.
@@ -560,6 +667,7 @@ where
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection_mode = SelectionMode::Row;
         self.selected_row = None;
+        self.row_anchor = None;
         self.selected_col = None;
         self.selected_cell = None;
         self.right_clicked_cell = None;
@@ -732,7 +840,12 @@ where
             return;
         }
 
-        self.set_selected_row(row_ix, cx);
+        if e.modifiers().shift {
+            cx.stop_propagation();
+            self.extend_selected_rows(row_ix, cx);
+        } else {
+            self.set_selected_row(row_ix, cx);
+        }
 
         if e.click_count() == 2 {
             cx.emit(TableEvent::DoubleClickedRow(row_ix));
@@ -770,6 +883,14 @@ where
         cx.stop_propagation();
 
         let is_double_click = e.click_count() == 2;
+
+        // The press already selected the row, or extended the rows to it.
+        if self.col_selects_row(col_ix) {
+            if is_double_click {
+                cx.emit(TableEvent::DoubleClickedCell(row_ix, col_ix));
+            }
+            return;
+        }
 
         // When the row header column is hidden, a single click on the
         // already-selected cell escalates the selection to the entire row —
@@ -1887,7 +2008,8 @@ where
     ) -> Stateful<Div> {
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
         let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
-        let is_selected = self.selected_row == Some(row_ix);
+        let is_selected = self.is_row_selected(row_ix);
+        let rows = self.row_range().unwrap_or_default();
         let view = cx.entity().clone();
         let row_height = self.body_row_height();
 
@@ -1969,6 +2091,16 @@ where
                                                             )
                                                         },
                                                     )
+                                                    .when(self.col_selects_row(col_ix), |this| {
+                                                        this.on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(move |table, e, _, cx| {
+                                                                table.on_row_selector_mouse_down(
+                                                                    e, row_ix, cx,
+                                                                );
+                                                            }),
+                                                        )
+                                                    })
                                                     .when(self.cell_selectable, |this| {
                                                         this.on_click(cx.listener(
                                                             move |table, e, window, cx| {
@@ -2093,6 +2225,22 @@ where
                                                                 )
                                                             },
                                                         )
+                                                        .when(
+                                                            table.col_selects_row(col_ix),
+                                                            |this| {
+                                                                this.on_mouse_down(
+                                                                    MouseButton::Left,
+                                                                    cx.listener(
+                                                                        move |table, e, _, cx| {
+                                                                            table
+                                                                        .on_row_selector_mouse_down(
+                                                                            e, row_ix, cx,
+                                                                        );
+                                                                        },
+                                                                    ),
+                                                                )
+                                                            },
+                                                        )
                                                         .when(table.cell_selectable, |this| {
                                                             this.on_click(cx.listener(
                                                                 move |table, e, window, cx| {
@@ -2132,17 +2280,28 @@ where
                 // Note: Don't show row selection if a cell is selected
                 .when_some(self.selected_row, |this, _| {
                     this.when(is_selected && self.selection_mode.is_row(), |this| {
+                        // A range of rows is drawn as one box: the rows inside
+                        // it leave out the edges they share with a neighbour.
+                        let first = row_ix == rows.start;
+                        let last = row_ix + 1 == rows.end;
                         this.map(|this| {
                             if cx.theme().list.active_highlight {
                                 this.border_color(gpui::transparent_white()).child(
                                     div()
-                                        .top(if row_ix == 0 { px(0.) } else { px(-1.) })
+                                        .top(if row_ix == 0 || !first {
+                                            px(0.)
+                                        } else {
+                                            px(-1.)
+                                        })
                                         .left(px(0.))
                                         .right(px(0.))
-                                        .bottom(px(-1.))
+                                        .bottom(if last { px(-1.) } else { px(0.) })
                                         .absolute()
                                         .bg(cx.theme().tokens.table_active)
-                                        .border_1()
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .when(first, |this| this.border_t_1())
+                                        .when(last, |this| this.border_b_1())
                                         .border_color(cx.theme().table_active_border),
                                 )
                             } else {
@@ -2172,6 +2331,9 @@ where
                 )
                 .on_click(cx.listener(move |this, e, window, cx| {
                     this.on_row_left_click(e, row_ix, window, cx);
+                }))
+                .on_mouse_move(cx.listener(move |this, e, _, cx| {
+                    this.on_row_mouse_move(e, row_ix, cx);
                 }))
         } else {
             // Render fake rows to fill the rest table space
@@ -2518,9 +2680,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{App, Entity, MouseClickEvent, TestAppContext, VisualTestContext};
+    use gpui::{
+        App, Entity, Modifiers, MouseClickEvent, Subscription, TestAppContext, VisualTestContext,
+    };
+    use std::{cell::RefCell, rc::Rc};
 
     /// Three columns and twenty rows of nothing: enough to click around in.
+    /// The first column is the row numbers, and selects rows.
     struct Grid;
 
     impl TableDelegate for Grid {
@@ -2533,8 +2699,9 @@ mod tests {
         }
 
         fn column(&self, col_ix: usize, _: &App) -> Column {
-            Column::new(format!("c{col_ix}"), format!("c{col_ix}"))
-                .when(col_ix == 0, |column| column.fixed(ColumnFixed::Left))
+            Column::new(format!("c{col_ix}"), format!("c{col_ix}")).when(col_ix == 0, |column| {
+                column.fixed(ColumnFixed::Left).selects_row(true)
+            })
         }
 
         fn render_td(
@@ -2603,6 +2770,187 @@ mod tests {
 
             state.read_with(cx, |state, _| assert_eq!(state.right_clicked_cell, None));
         }
+    }
+
+    fn press(shift: bool) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            modifiers: Modifiers {
+                shift,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn moved(held: bool) -> MouseMoveEvent {
+        MouseMoveEvent {
+            pressed_button: held.then_some(MouseButton::Left),
+            ..Default::default()
+        }
+    }
+
+    /// Everything the table announced, in order.
+    fn record(
+        state: &Entity<TableState<Grid>>,
+        cx: &mut VisualTestContext,
+    ) -> (Rc<RefCell<Vec<String>>>, Subscription) {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let subscription = cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(state, move |_, event: &TableEvent, _| {
+                let text = match event {
+                    TableEvent::SelectRow(row) => format!("row {row}"),
+                    TableEvent::SelectRows(rows) => format!("rows {rows:?}"),
+                    TableEvent::SelectCell(row, col) => format!("cell {row},{col}"),
+                    TableEvent::ClearSelection => "clear".into(),
+                    _ => return,
+                };
+                events.borrow_mut().push(text);
+            })
+        });
+        (events, subscription)
+    }
+
+    /// A press on the row numbers selects that row, and a shift-press
+    /// further down selects everything from the first row to that one.
+    #[gpui::test]
+    fn a_shift_press_on_the_row_numbers_selects_a_range(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+        let (events, _subscription) = record(&state, cx);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 3, cx);
+                state.on_row_selector_mouse_down(&press(true), 7, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| assert_eq!(state.selected_rows(), Some(3..8)));
+        assert_eq!(*events.borrow(), ["row 3", "rows 3..8"]);
+    }
+
+    /// Shift works upward too: the range is always first row to last.
+    #[gpui::test]
+    fn a_range_can_be_extended_upward(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 9, cx);
+                state.on_row_selector_mouse_down(&press(true), 4, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_rows(), Some(4..10))
+        });
+    }
+
+    /// A drag down the row numbers selects every row the pointer passes, and
+    /// shrinks back when it turns around.
+    #[gpui::test]
+    fn a_drag_down_the_row_numbers_selects_the_rows_it_passes(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 2, cx);
+                for row in 3..=6 {
+                    state.on_row_mouse_move(&moved(true), row, cx);
+                }
+                state.on_row_mouse_move(&moved(true), 5, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| assert_eq!(state.selected_rows(), Some(2..6)));
+    }
+
+    /// Once the button is up, the pointer passing over rows changes nothing,
+    /// wherever the release happened.
+    #[gpui::test]
+    fn the_drag_ends_when_the_button_is_released(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 2, cx);
+                state.on_row_mouse_move(&moved(true), 4, cx);
+                state.on_row_mouse_move(&moved(false), 9, cx);
+                state.on_row_mouse_move(&moved(true), 12, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| assert_eq!(state.selected_rows(), Some(2..5)));
+    }
+
+    /// A plain press after a range starts over with one row.
+    #[gpui::test]
+    fn a_plain_press_after_a_range_selects_one_row(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 2, cx);
+                state.on_row_selector_mouse_down(&press(true), 6, cx);
+                state.on_row_selector_mouse_down(&press(false), 10, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_rows(), Some(10..11))
+        });
+    }
+
+    /// A selected cell counts as its row, so a shift-press on the row numbers
+    /// selects from the cell's row down.
+    #[gpui::test]
+    fn a_shift_press_after_a_cell_starts_the_range_at_its_row(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.on_cell_click(&left_click(), 5, 2, window, cx);
+                state.on_row_selector_mouse_down(&press(true), 8, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| assert_eq!(state.selected_rows(), Some(5..9)));
+    }
+
+    /// The click that follows a press on the row numbers must not turn the
+    /// row the press selected into a selected cell.
+    #[gpui::test]
+    fn a_click_on_the_row_numbers_leaves_the_row_selected(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 3, cx);
+                state.on_cell_click(&left_click(), 3, 0, window, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_rows(), Some(3..4));
+            assert_eq!(state.selected_cell(), None);
+        });
+    }
+
+    /// A cell selected after a range means no rows are selected any more.
+    #[gpui::test]
+    fn a_selected_cell_is_not_a_selected_row(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.on_row_selector_mouse_down(&press(false), 2, cx);
+                state.on_row_selector_mouse_down(&press(true), 6, cx);
+                state.on_cell_click(&left_click(), 4, 1, window, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| assert_eq!(state.selected_rows(), None));
     }
 
     /// Rows can be made taller than the header, and back.
