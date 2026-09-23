@@ -227,6 +227,8 @@ pub struct TableState<D: TableDelegate> {
     pub horizontal_scroll_handle: VirtualListScrollHandle,
 
     selected_row: Option<usize>,
+    /// The height of a body row, when it differs from the header's.
+    row_height: Option<Pixels>,
     selection_mode: SelectionMode,
     right_clicked_row: Option<usize>,
     right_clicked_cell: Option<(usize, usize)>,
@@ -264,6 +266,7 @@ where
             vertical_scroll_handle: UniformListScrollHandle::new(),
             selection_mode: SelectionMode::Row,
             selected_row: None,
+            row_height: None,
             right_clicked_row: None,
             right_clicked_cell: None,
             selected_col: None,
@@ -371,6 +374,30 @@ where
     pub fn row_header(mut self, row_header: bool) -> Self {
         self.row_header = row_header;
         self
+    }
+
+    /// Set the height of a body row, default is the height of the table size.
+    ///
+    /// The header keeps the height of the table size, so rows can be made
+    /// tall enough for several lines of text without the header growing too.
+    pub fn row_height(mut self, height: Pixels) -> Self {
+        self.row_height = Some(height);
+        self
+    }
+
+    /// Change the height of a body row, or go back to the height of the table
+    /// size with `None`. See [`Self::row_height`].
+    pub fn set_row_height(&mut self, height: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.row_height != height {
+            self.row_height = height;
+            cx.notify();
+        }
+    }
+
+    /// The height every body row is drawn at.
+    fn body_row_height(&self) -> Pixels {
+        self.row_height
+            .unwrap_or_else(|| self.options.size.table_row_height())
     }
 
     /// When we update columns or rows, we need to refresh the table.
@@ -632,7 +659,7 @@ where
     }
 
     fn page_item_count(&self) -> usize {
-        let row_height = self.options.size.table_row_height();
+        let row_height = self.body_row_height();
         let height = self.bounds.size.height;
         let count = (height / row_height).floor() as usize;
         count.saturating_sub(1).max(1)
@@ -1806,7 +1833,7 @@ where
         let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
         let is_selected = self.selected_row == Some(row_ix);
         let view = cx.entity().clone();
-        let row_height = self.options.size.table_row_height();
+        let row_height = self.body_row_height();
 
         if row_ix < rows_count {
             let is_last_row = row_ix + 1 == rows_count;
@@ -2240,7 +2267,7 @@ where
         let rows_count = self.delegate.rows_count(cx);
         let loading = self.delegate.loading(cx);
 
-        let row_height = self.options.size.table_row_height();
+        let row_height = self.body_row_height();
         let total_height = self
             .vertical_scroll_handle
             .0
@@ -2519,5 +2546,23 @@ mod tests {
 
             state.read_with(cx, |state, _| assert_eq!(state.right_clicked_cell, None));
         }
+    }
+
+    /// Rows can be made taller than the header, and back.
+    #[gpui::test]
+    fn the_body_rows_can_be_taller_than_the_header(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        let header = state.read_with(cx, |state, _| state.options.size.table_row_height());
+        state.read_with(cx, |state, _| assert_eq!(state.body_row_height(), header));
+
+        cx.update(|_, cx| state.update(cx, |state, cx| state.set_row_height(Some(px(80.)), cx)));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.body_row_height(), px(80.));
+            assert_eq!(state.options.size.table_row_height(), header);
+        });
+
+        cx.update(|_, cx| state.update(cx, |state, cx| state.set_row_height(None, cx)));
+        state.read_with(cx, |state, _| assert_eq!(state.body_row_height(), header));
     }
 }
