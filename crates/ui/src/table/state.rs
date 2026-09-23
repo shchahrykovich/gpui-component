@@ -409,6 +409,7 @@ where
         cx.stop_propagation();
         self.selection_mode = SelectionMode::Row;
         self.right_clicked_row = None;
+        self.right_clicked_cell = None;
         self.selected_row = Some(row_ix);
         if let Some(row_ix) = self.selected_row {
             self.vertical_scroll_handle.scroll_to_item(
@@ -447,6 +448,7 @@ where
     /// Sets the selected col to the given index.
     pub fn set_selected_col(&mut self, col_ix: usize, cx: &mut Context<Self>) {
         self.selection_mode = SelectionMode::Column;
+        self.right_clicked_cell = None;
         self.selected_col = Some(col_ix);
         if let Some(col_ix) = self.selected_col {
             self.scroll_to_col(col_ix, cx);
@@ -488,6 +490,9 @@ where
     pub fn set_selected_cell(&mut self, row_ix: usize, col_ix: usize, cx: &mut Context<Self>) {
         self.selection_mode = SelectionMode::Cell;
         self.selected_cell = Some((row_ix, col_ix));
+        // The outline a right click leaves stays only until the selection
+        // moves; after that it reads as a second selected cell.
+        self.right_clicked_cell = None;
 
         // Scroll to the cell
         self.vertical_scroll_handle
@@ -504,6 +509,7 @@ where
         self.selected_row = None;
         self.selected_col = None;
         self.selected_cell = None;
+        self.right_clicked_cell = None;
         cx.emit(TableEvent::ClearSelection);
         cx.notify();
     }
@@ -2251,6 +2257,7 @@ where
             rows_count
         };
         let right_clicked_row = self.right_clicked_row;
+        let right_clicked_cell = self.right_clicked_cell;
         let is_filled = total_height > Pixels::ZERO && total_height <= actual_height;
 
         let loading_view = if loading {
@@ -2392,12 +2399,15 @@ where
                             &self.vertical_scroll_handle.0.borrow().base_handle,
                         ))
                     })
-                    .when(right_clicked_row.is_some(), |this| {
-                        this.on_mouse_down_out(cx.listener(|this, e, window, cx| {
-                            this.on_row_right_click(e, None, window, cx);
-                            cx.notify();
-                        }))
-                    })
+                    .when(
+                        right_clicked_row.is_some() || right_clicked_cell.is_some(),
+                        |this| {
+                            this.on_mouse_down_out(cx.listener(|this, e, window, cx| {
+                                this.on_row_right_click(e, None, window, cx);
+                                cx.notify();
+                            }))
+                        },
+                    )
             })
             .on_prepaint({
                 let state = cx.entity();
@@ -2418,5 +2428,95 @@ where
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{App, Entity, MouseClickEvent, TestAppContext, VisualTestContext};
+
+    /// Three columns and twenty rows of nothing: enough to click around in.
+    struct Grid;
+
+    impl TableDelegate for Grid {
+        fn columns_count(&self, _: &App) -> usize {
+            3
+        }
+
+        fn rows_count(&self, _: &App) -> usize {
+            20
+        }
+
+        fn column(&self, col_ix: usize, _: &App) -> Column {
+            Column::new(format!("c{col_ix}"), format!("c{col_ix}"))
+        }
+
+        fn render_td(
+            &mut self,
+            _: usize,
+            _: usize,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn table(cx: &mut TestAppContext) -> (Entity<TableState<Grid>>, &mut VisualTestContext) {
+        cx.update(crate::init);
+        cx.add_window_view(|window, cx| TableState::new(Grid, window, cx).cell_selectable(true))
+    }
+
+    fn left_click() -> ClickEvent {
+        ClickEvent::Mouse(MouseClickEvent::default())
+    }
+
+    /// A right-clicked cell is outlined while its menu is open. Once the
+    /// reader has left-clicked another cell, the outline is a second
+    /// selection that is not one.
+    #[gpui::test]
+    fn a_left_click_on_another_cell_clears_the_right_clicked_cell(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.on_cell_right_click(&MouseDownEvent::default(), 0, 1, window, cx);
+                state.on_cell_click(&left_click(), 11, 1, window, cx);
+            })
+        });
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_cell, Some((11, 1)));
+            assert_eq!(state.right_clicked_cell, None);
+        });
+    }
+
+    /// The same for every other way the selection moves: a row, a column,
+    /// and clearing it.
+    #[gpui::test]
+    fn any_new_selection_clears_the_right_clicked_cell(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        for select in [
+            |state: &mut TableState<Grid>, cx: &mut Context<TableState<Grid>>| {
+                state.set_selected_row(4, cx)
+            },
+            |state: &mut TableState<Grid>, cx: &mut Context<TableState<Grid>>| {
+                state.set_selected_col(2, cx)
+            },
+            |state: &mut TableState<Grid>, cx: &mut Context<TableState<Grid>>| {
+                state.clear_selection(cx)
+            },
+        ] {
+            cx.update(|window, cx| {
+                state.update(cx, |state, cx| {
+                    state.on_cell_right_click(&MouseDownEvent::default(), 0, 1, window, cx);
+                    select(state, cx);
+                })
+            });
+
+            state.read_with(cx, |state, _| assert_eq!(state.right_clicked_cell, None));
+        }
     }
 }
