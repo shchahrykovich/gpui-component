@@ -117,6 +117,17 @@ pub trait TableDelegate: Sized + 'static {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement;
 
+    /// Whether the cell at `row_ix`, `col_ix` may draw outside its own box.
+    ///
+    /// Every cell is clipped to its box by default. A cell that answers `true`
+    /// is not, so content laid out wider than the cell runs on over the cells
+    /// to its right, the way a spreadsheet lets a long value spill across
+    /// empty neighbours. How far it runs is up to what `render_td` returns:
+    /// the table only stops cutting it off.
+    fn cell_overflows(&self, row_ix: usize, col_ix: usize, cx: &App) -> bool {
+        false
+    }
+
     /// Move the column at the given `col_ix` so that it ends up at the index `to_ix`.
     ///
     /// e.g.: `let col = self.columns.remove(col_ix); self.columns.insert(to_ix, col);`

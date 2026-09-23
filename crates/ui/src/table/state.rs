@@ -1235,10 +1235,10 @@ where
 
     fn render_cell(
         &self,
-        _row_ix: Option<usize>,
+        row_ix: Option<usize>,
         col_ix: usize,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Div {
         let Some(col_group) = self.col_groups.get(col_ix) else {
             return div();
@@ -1246,12 +1246,14 @@ where
 
         let col_width = col_group.width;
         let col_padding = col_group.column.paddings;
+        let overflows =
+            row_ix.is_some_and(|row_ix| self.delegate.cell_overflows(row_ix, col_ix, cx));
 
         div()
             .w(col_width)
             .h_full()
             .flex_shrink_0()
-            .overflow_hidden()
+            .when(!overflows, |this| this.overflow_hidden())
             .whitespace_nowrap()
             .table_cell_size(self.options.size)
             .map(|this| match col_padding {
