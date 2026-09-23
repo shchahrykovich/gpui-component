@@ -20,7 +20,7 @@ use crate::{
     text::node::LinkMark,
     text::selection::word_range_at,
     text::style::TextSearch,
-    text::text_view::{LinkClickHandlerFn, handle_link_click},
+    text::text_view::{LinkClickHandlerFn, LinkHover, handle_link_click, set_hovered_link},
 };
 
 /// A inline element used to render a inline text and support selectable.
@@ -101,16 +101,16 @@ impl Inline {
         self
     }
 
-    /// Get link at given mouse position.
+    /// Get link at given mouse position, and the range of the text it covers.
     fn link_for_position(
         layout: &TextLayout,
         links: &Vec<(Range<usize>, LinkMark)>,
         position: Point<Pixels>,
-    ) -> Option<LinkMark> {
+    ) -> Option<(Range<usize>, LinkMark)> {
         let offset = layout.index_for_position(position).ok()?;
         for (range, link) in links.iter() {
             if range.contains(&offset) {
-                return Some(link.clone());
+                return Some((range.clone(), link.clone()));
             }
         }
 
@@ -609,6 +609,53 @@ impl Element for Inline {
             }
         });
 
+        // Which link the pointer is on, for a caller that asked with
+        // `on_link_hover`. The run that drew the link says when the pointer
+        // arrives on it; the text view says when it leaves.
+        if !self.links.is_empty()
+            && let Some(text_view_state) = UiGlobalState::global(cx).text_view_state().cloned()
+            && text_view_state.read(cx).link_hover_handler.is_some()
+        {
+            window.on_mouse_event({
+                let links = self.links.clone();
+                let text = self.text.clone();
+                let text_layout = text_layout.clone();
+                let hitbox = hitbox.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    // A drag is a selection being made, not a link being read.
+                    if !phase.bubble()
+                        || !hitbox.is_hovered(window)
+                        || event.pressed_button.is_some()
+                    {
+                        return;
+                    }
+                    // Still on the piece of the link the caller was told of.
+                    if text_view_state
+                        .read(cx)
+                        .hovered_link
+                        .as_ref()
+                        .is_some_and(|hover| hover.bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    let Some((range, link)) =
+                        Self::link_for_position(&text_layout, &links, event.position)
+                    else {
+                        return;
+                    };
+                    let Some(bounds) = link_piece_under(&text, &text_layout, range, event.position)
+                    else {
+                        return;
+                    };
+                    let hover = LinkHover {
+                        url: link.url,
+                        bounds,
+                    };
+                    set_hovered_link(&text_view_state, Some(hover), window, cx);
+                }
+            });
+        }
+
         if !is_selection {
             // click to open link
             window.on_mouse_event({
@@ -629,7 +676,7 @@ impl Element for Inline {
                         return;
                     }
 
-                    if let Some(link) =
+                    if let Some((_, link)) =
                         Self::link_for_position(&text_layout, &links, event.position)
                     {
                         gpui_base::TextSelection::end(window, cx);
@@ -672,6 +719,48 @@ fn selection_for_multi_click(
         // so triple-click only selects the run on the clicked side of the image.
         TextViewMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
     }
+}
+
+/// Where the piece of the link `range` on the pointer's line was drawn.
+///
+/// A link that wraps is drawn on more than one line, and the box around all of
+/// it covers text that is not the link at all. So the answer is the piece on
+/// the line the pointer is on, and moving to the next line of the same link is
+/// reported as a new piece.
+///
+/// `None` when the piece does not hold the pointer. That happens past the last
+/// character of a wrapped line, where there is no next character on the same
+/// line to measure the width against. The text view says the link is gone as
+/// soon as the pointer is outside its piece, so a piece that did not hold the
+/// pointer would be reported and taken back again on every move.
+fn link_piece_under(
+    text: &str,
+    text_layout: &TextLayout,
+    range: Range<usize>,
+    position: Point<Pixels>,
+) -> Option<Bounds<Pixels>> {
+    let line_height = text_layout.line_height();
+    let under_pointer = text_layout.index_for_position(position).ok()?;
+    let line_top = text_layout.position_for_index(under_pointer)?.y;
+
+    let mut piece: Option<Bounds<Pixels>> = None;
+    let mut offset = range.start;
+    for c in text.get(range)?.chars() {
+        let next_offset = offset + c.len_utf8();
+        if let Some(pos) = text_layout.position_for_index(offset)
+            && pos.y == line_top
+        {
+            let right = text_layout
+                .position_for_index(next_offset)
+                .filter(|next| next.y == pos.y)
+                .map_or(pos.x + line_height.half(), |next| next.x);
+            let char_bounds = Bounds::from_corners(pos, point(right, pos.y + line_height));
+            piece = Some(piece.map_or(char_bounds, |piece| piece.union(&char_bounds)));
+        }
+        offset = next_offset;
+    }
+
+    piece.filter(|piece| piece.contains(&position))
 }
 
 /// The largest char boundary at or before `index`.

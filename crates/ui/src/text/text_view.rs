@@ -4,7 +4,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Element, ElementId, Entity, GlobalElementId, Hitbox,
     HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    MouseMoveEvent, ParentElement, Pixels, ScrollWheelEvent, SharedString, StyleRefinement, Styled,
+    Window, div,
 };
 
 use crate::StyledExt;
@@ -54,6 +55,77 @@ pub(crate) fn handle_link_click(
     }
 }
 
+/// The link under the pointer, as [`TextView::on_link_hover`] reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkHover {
+    /// Where the link points, exactly as the document writes it.
+    pub url: SharedString,
+    /// Where the piece of the link on the pointer's line was drawn, in window
+    /// coordinates.
+    ///
+    /// A link that wraps is drawn on more than one line, and this is the one
+    /// line the pointer is on, not the box around all of it. A caller placing
+    /// something clear of the link keeps it clear of the part being read.
+    pub bounds: Bounds<Pixels>,
+}
+
+/// Type for the handler told which link the pointer is on.
+pub(crate) type LinkHoverHandlerFn =
+    dyn Fn(Option<&LinkHover>, &mut Window, &mut App) + Send + Sync;
+
+/// Record the link under the pointer, or that there is none, and tell the
+/// caller of [`TextView::on_link_hover`].
+pub(crate) fn set_hovered_link(
+    state: &Entity<TextViewState>,
+    hover: Option<LinkHover>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let handler = state.update(cx, |state, _| {
+        state.hovered_link = hover.clone();
+        state.link_hover_handler.clone()
+    });
+    if let Some(handler) = handler {
+        handler(hover.as_ref(), window, cx);
+    }
+}
+
+/// Say the link is gone when the pointer leaves it, and when the document
+/// scrolls.
+///
+/// The run of text that drew a link says when the pointer arrives on it; the
+/// text view says when it leaves, because the pointer can leave a link for the
+/// margin or for another view, where no run is listening. These are registered
+/// on every frame, whether or not a link is under the pointer, because a frame
+/// painted before the pointer arrived still has to hear it leave.
+fn paint_link_hover_listeners(state: &Entity<TextViewState>, window: &mut Window) {
+    // The capture phase, so that leaving one link is always reported before the
+    // run under the pointer reports the next, in the bubble phase.
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseMoveEvent, phase, window, cx| {
+            let left_the_link = phase.capture()
+                && state
+                    .read(cx)
+                    .hovered_link
+                    .as_ref()
+                    .is_some_and(|hover| !hover.bounds.contains(&event.position));
+            if left_the_link {
+                set_hovered_link(&state, None, window, cx);
+            }
+        }
+    });
+    // A scroll moves the link out from under the pointer.
+    window.on_mouse_event({
+        let state = state.clone();
+        move |_: &ScrollWheelEvent, phase, window, cx| {
+            if phase.capture() && state.read(cx).hovered_link.is_some() {
+                set_hovered_link(&state, None, window, cx);
+            }
+        }
+    });
+}
+
 /// A text view that can render Markdown or HTML.
 ///
 /// ## Goals
@@ -84,6 +156,7 @@ pub struct TextView {
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    link_hover_handler: Option<Arc<LinkHoverHandlerFn>>,
     image_click_handler: Option<Arc<ImageClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
 }
@@ -127,6 +200,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
@@ -147,6 +221,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
@@ -167,6 +242,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             image_click_handler: None,
             markdown_extensions: Arc::default(),
         }
@@ -298,6 +374,24 @@ impl TextView {
         F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
     {
         self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Be told which link the pointer is on, to say where it points.
+    ///
+    /// The handler is called with the link when the pointer moves onto one,
+    /// again when it moves onto another link or onto the next line of the same
+    /// one, and with `None` when it leaves or the document scrolls. It is not
+    /// called again while the pointer moves along the same piece of a link, so
+    /// a caller can redraw on every call.
+    ///
+    /// Without a handler nothing is listened for, and a link behaves exactly
+    /// as it always has.
+    pub fn on_link_hover<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Option<&LinkHover>, &mut Window, &mut App) + Send + Sync + 'static,
+    {
+        self.link_hover_handler = Some(Arc::new(handler));
         self
     }
 
@@ -434,6 +528,7 @@ impl Element for TextView {
             state.code_block_actions = self.code_block_actions.clone();
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
+            state.link_hover_handler = self.link_hover_handler.clone();
             state.image_click_handler = self.image_click_handler.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
@@ -510,6 +605,11 @@ impl Element for TextView {
             .push(state.clone());
         request_layout.element.paint(window, cx);
         UiGlobalState::global_mut(cx).text_view_state_stack.pop();
+
+        // A text view nobody asked about its links listens for nothing.
+        if self.link_hover_handler.is_some() {
+            paint_link_hover_listeners(state, window);
+        }
 
         if self.selectable {
             let (adapter, scroll_offset, content_bounds) = {

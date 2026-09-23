@@ -13,12 +13,13 @@ use crate::{
     input::{self, SelectAll},
     scroll::AutoScroll,
     text::{
-        CodeBlockActionsFn, ImageClickHandlerFn, LinkClickHandlerFn, MarkdownExtensions,
+        CodeBlockActionsFn, ImageClickHandlerFn, LinkClickHandlerFn, LinkHover, MarkdownExtensions,
         TableActionsFn, TextViewStyle,
         document::ParsedDocument,
         format,
         node::{self, NodeContext},
         selection_adapter::TextViewSelectionAdapter,
+        text_view::LinkHoverHandlerFn,
     },
     v_flex,
 };
@@ -83,6 +84,7 @@ pub struct TextViewState {
     pub(super) code_block_actions: Option<std::sync::Arc<CodeBlockActionsFn>>,
     pub(super) table_actions: Option<std::sync::Arc<TableActionsFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
+    pub(super) link_hover_handler: Option<std::sync::Arc<LinkHoverHandlerFn>>,
     pub(super) image_click_handler: Option<std::sync::Arc<ImageClickHandlerFn>>,
     pub(super) markdown_extensions: Arc<MarkdownExtensions>,
 
@@ -92,6 +94,13 @@ pub struct TextViewState {
     select_all: bool,
     pub(super) auto_scroll: AutoScroll,
     pub(super) selection_adapter: TextViewSelectionAdapter,
+    /// The link under the pointer, as the caller of `on_link_hover` was last
+    /// told it.
+    ///
+    /// Kept here rather than on the run of text that drew the link, because a
+    /// run can be rebuilt with fresh state on any frame, and only one link in
+    /// a document can be under the pointer at a time anyway.
+    pub(super) hovered_link: Option<LinkHover>,
 
     pub(super) parsed_content: ParsedContent,
     /// Content format (markdown / html), used for bounded synchronous parsing
@@ -179,11 +188,13 @@ impl TextViewState {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             image_click_handler: None,
             markdown_extensions: Arc::default(),
             is_selecting: false,
             auto_scroll: AutoScroll::default(),
             selection_adapter,
+            hovered_link: None,
             parsed_content: Default::default(),
             format,
             parsed_error: None,

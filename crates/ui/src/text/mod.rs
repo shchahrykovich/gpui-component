@@ -2,6 +2,8 @@ mod document;
 mod format;
 mod inline;
 mod inline_flow;
+#[cfg(test)]
+mod link_hover_test;
 mod markdown_ext;
 mod node;
 #[cfg(test)]
