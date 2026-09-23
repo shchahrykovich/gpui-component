@@ -234,6 +234,9 @@ pub struct TableState<D: TableDelegate> {
     pub row_header: bool,
     /// Whether the table can sort.
     pub sortable: bool,
+    /// Whether a shift-click on a sort icon adds the column to the sort,
+    /// default is false. See [`Self::multi_sortable`].
+    pub multi_sortable: bool,
     /// Whether the table can resize columns.
     pub col_resizable: bool,
     /// Whether the table can move columns.
@@ -308,6 +311,7 @@ where
             cell_selectable: false,
             row_header: true,
             sortable: true,
+            multi_sortable: false,
             col_movable: true,
             col_resizable: true,
             col_fixed: true,
@@ -350,6 +354,20 @@ where
     /// Set to enable/disable column sortable, default true
     pub fn sortable(mut self, sortable: bool) -> Self {
         self.sortable = sortable;
+        self
+    }
+
+    /// Set whether the rows can be sorted by more than one column, default
+    /// false.
+    ///
+    /// When `true`, a shift-click on a sort icon adds that column to the sort
+    /// as the next key, or turns its direction round when it is in the sort
+    /// already, and the delegate hears the whole list through
+    /// [`TableDelegate::perform_sorts`]. A plain click still sorts by the one
+    /// column clicked. Each sorted column shows its place in the sort beside
+    /// its icon while there is more than one.
+    pub fn multi_sortable(mut self, multi_sortable: bool) -> Self {
+        self.multi_sortable = multi_sortable;
         self
     }
 
@@ -1243,7 +1261,17 @@ where
         }
     }
 
-    fn perform_sort(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// A click on the sort icon of column `col_ix`: its direction turns one
+    /// step round. With `more`, on a table that is
+    /// [`multi_sortable`](Self::multi_sortable), the other columns keep their
+    /// sort and this one joins it as the next key, or leaves it.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        more: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.sortable {
             return;
         }
@@ -1260,19 +1288,65 @@ where
             ColumnSort::Default => ColumnSort::Descending,
         };
 
+        if more && self.multi_sortable {
+            let mut keys = self.sort_keys();
+            match sort {
+                ColumnSort::Default => keys.retain(|&ix| ix != col_ix),
+                _ if !keys.contains(&col_ix) => keys.push(col_ix),
+                _ => {}
+            }
+            self.col_groups[col_ix].column.sort = Some(sort);
+            for col_group in &mut self.col_groups {
+                col_group.column.sort_rank = None;
+            }
+            for (rank, &ix) in keys.iter().enumerate() {
+                self.col_groups[ix].column.sort_rank = Some(rank + 1);
+            }
+            let sorts: Vec<(usize, ColumnSort)> = keys
+                .iter()
+                .filter_map(|&ix| Some((ix, self.col_groups[ix].column.sort?)))
+                .collect();
+            self.delegate_mut().perform_sorts(&sorts, window, cx);
+            cx.notify();
+            return;
+        }
+
         for (ix, col_group) in self.col_groups.iter_mut().enumerate() {
             if ix == col_ix {
                 col_group.column.sort = Some(sort);
+                col_group.column.sort_rank = (sort != ColumnSort::Default).then_some(1);
             } else {
                 if col_group.column.sort.is_some() {
                     col_group.column.sort = Some(ColumnSort::Default);
                 }
+                col_group.column.sort_rank = None;
             }
         }
 
         self.delegate_mut().perform_sort(col_ix, sort, window, cx);
 
         cx.notify();
+    }
+
+    /// The columns the rows are sorted by, first key first.
+    ///
+    /// A sorted column the delegate gave no rank goes after the ranked ones,
+    /// in column order, so a table that never ranks still has an order.
+    fn sort_keys(&self) -> Vec<usize> {
+        let mut keys: Vec<(usize, usize)> = self
+            .col_groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| {
+                matches!(
+                    group.column.sort,
+                    Some(ColumnSort::Ascending | ColumnSort::Descending)
+                )
+            })
+            .map(|(ix, group)| (group.column.sort_rank.unwrap_or(usize::MAX), ix))
+            .collect();
+        keys.sort();
+        keys.into_iter().map(|(_, ix)| ix).collect()
     }
 
     fn move_column(
@@ -1606,11 +1680,18 @@ where
             ColumnSort::Descending => (IconName::SortDescending, true),
             ColumnSort::Default => (IconName::ChevronsUpDown, false),
         };
+        // The column's place in the sort, only while there is more than one
+        // column to tell it from.
+        let rank = col_group
+            .column
+            .sort_rank
+            .filter(|_| is_on && self.sort_keys().len() > 1);
 
         Some(
-            div()
+            h_flex()
                 .id(("icon-sort", col_ix))
                 .flex_shrink_0()
+                .items_center()
                 .p(px(2.))
                 .rounded(cx.theme().radius / 2.)
                 .map(|this| match is_on {
@@ -1619,14 +1700,23 @@ where
                 })
                 .hover(|this| this.bg(cx.theme().tokens.secondary).opacity(7.))
                 .active(|this| this.bg(cx.theme().tokens.secondary_active).opacity(1.))
-                .on_click(
-                    cx.listener(move |table, _, window, cx| table.perform_sort(col_ix, window, cx)),
-                )
+                .on_click(cx.listener(move |table, e: &ClickEvent, window, cx| {
+                    table.perform_sort(col_ix, e.modifiers().shift, window, cx)
+                }))
                 .child(
                     Icon::new(icon)
                         .size_3()
                         .text_color(cx.theme().secondary_foreground),
-                ),
+                )
+                .when_some(rank, |this, rank| {
+                    this.child(
+                        div()
+                            .text_size(px(9.))
+                            .line_height(px(9.))
+                            .text_color(cx.theme().secondary_foreground)
+                            .child(rank.to_string()),
+                    )
+                }),
         )
     }
 
@@ -2990,5 +3080,170 @@ mod tests {
                 "past the last column"
             );
         });
+    }
+
+    /// Four sortable columns that remember every sort they were asked for.
+    struct Sortable(Rc<RefCell<Vec<Vec<(usize, ColumnSort)>>>>);
+
+    impl TableDelegate for Sortable {
+        fn columns_count(&self, _: &App) -> usize {
+            4
+        }
+
+        fn rows_count(&self, _: &App) -> usize {
+            3
+        }
+
+        fn column(&self, col_ix: usize, _: &App) -> Column {
+            Column::new(format!("c{col_ix}"), format!("c{col_ix}")).sortable()
+        }
+
+        fn render_td(
+            &mut self,
+            _: usize,
+            _: usize,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) -> impl IntoElement {
+            div()
+        }
+
+        fn perform_sort(
+            &mut self,
+            col_ix: usize,
+            sort: ColumnSort,
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) {
+            let one = if sort == ColumnSort::Default {
+                vec![]
+            } else {
+                vec![(col_ix, sort)]
+            };
+            self.0.borrow_mut().push(one);
+        }
+
+        fn perform_sorts(
+            &mut self,
+            sorts: &[(usize, ColumnSort)],
+            _: &mut Window,
+            _: &mut Context<TableState<Self>>,
+        ) {
+            self.0.borrow_mut().push(sorts.to_vec());
+        }
+    }
+
+    type Asked = Rc<RefCell<Vec<Vec<(usize, ColumnSort)>>>>;
+
+    fn sortable(
+        cx: &mut TestAppContext,
+        multi: bool,
+    ) -> (Entity<TableState<Sortable>>, Asked, &mut VisualTestContext) {
+        cx.update(crate::init);
+        let asked: Asked = Rc::default();
+        let delegate = Sortable(asked.clone());
+        let (state, cx) = cx.add_window_view(move |window, cx| {
+            TableState::new(delegate, window, cx).multi_sortable(multi)
+        });
+        (state, asked, cx)
+    }
+
+    /// Click the sort icons of `clicks`, each with shift held or not.
+    fn click_sorts(
+        state: &Entity<TableState<Sortable>>,
+        cx: &mut VisualTestContext,
+        clicks: &[(usize, bool)],
+    ) {
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                for &(col_ix, shift) in clicks {
+                    state.perform_sort(col_ix, shift, window, cx);
+                }
+            })
+        });
+    }
+
+    fn ranks(
+        state: &Entity<TableState<Sortable>>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<Option<usize>> {
+        state.read_with(cx, |state, _| {
+            state
+                .col_groups
+                .iter()
+                .map(|g| g.column.sort_rank)
+                .collect()
+        })
+    }
+
+    /// A shift-click adds the column as the next key, and the first keeps
+    /// its place and its direction.
+    #[gpui::test]
+    fn a_shift_click_adds_a_column_to_the_sort(cx: &mut TestAppContext) {
+        let (state, asked, cx) = sortable(cx, true);
+
+        click_sorts(&state, cx, &[(2, false), (0, true)]);
+
+        assert_eq!(
+            asked.borrow().last().unwrap(),
+            &[(2, ColumnSort::Descending), (0, ColumnSort::Descending)]
+        );
+        assert_eq!(ranks(&state, cx), [Some(2), None, Some(1), None]);
+    }
+
+    /// A second shift-click on a key turns it round in its place, and a
+    /// third takes it out of the sort, moving the keys after it up.
+    #[gpui::test]
+    fn a_shift_click_turns_a_key_round_then_takes_it_out(cx: &mut TestAppContext) {
+        let (state, asked, cx) = sortable(cx, true);
+
+        click_sorts(&state, cx, &[(1, false), (2, true), (3, true), (2, true)]);
+        assert_eq!(
+            asked.borrow().last().unwrap(),
+            &[
+                (1, ColumnSort::Descending),
+                (2, ColumnSort::Ascending),
+                (3, ColumnSort::Descending),
+            ]
+        );
+
+        click_sorts(&state, cx, &[(2, true)]);
+        assert_eq!(
+            asked.borrow().last().unwrap(),
+            &[(1, ColumnSort::Descending), (3, ColumnSort::Descending)]
+        );
+        assert_eq!(ranks(&state, cx), [None, Some(1), None, Some(2)]);
+    }
+
+    /// A plain click sorts by the one column clicked, whatever was sorted.
+    #[gpui::test]
+    fn a_plain_click_sorts_by_one_column_again(cx: &mut TestAppContext) {
+        let (state, asked, cx) = sortable(cx, true);
+
+        click_sorts(&state, cx, &[(1, false), (2, true), (3, false)]);
+
+        assert_eq!(
+            asked.borrow().last().unwrap(),
+            &[(3, ColumnSort::Descending)]
+        );
+        assert_eq!(ranks(&state, cx), [None, None, None, Some(1)]);
+    }
+
+    /// A table that has not asked for it sorts by one column, shift or no
+    /// shift, exactly as it always did.
+    #[gpui::test]
+    fn shift_means_nothing_to_a_table_that_sorts_by_one_column(cx: &mut TestAppContext) {
+        let (state, asked, cx) = sortable(cx, false);
+
+        click_sorts(&state, cx, &[(1, false), (2, true)]);
+
+        assert_eq!(
+            asked.borrow().last().unwrap(),
+            &[(2, ColumnSort::Descending)]
+        );
+        let sorts: Vec<_> = state.read_with(cx, |state, _| {
+            state.col_groups.iter().map(|g| g.column.sort).collect()
+        });
+        assert_eq!(sorts[1], Some(ColumnSort::Default));
     }
 }

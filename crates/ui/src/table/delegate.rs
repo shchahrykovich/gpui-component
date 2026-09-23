@@ -35,6 +35,26 @@ pub trait TableDelegate: Sized + 'static {
     ) {
     }
 
+    /// Sort by several columns, the first entry first: each is a column index
+    /// and its direction, never [`ColumnSort::Default`]. An empty list is no
+    /// sort at all.
+    ///
+    /// Called instead of [`Self::perform_sort`] when the table is
+    /// [`TableState::multi_sortable`] and the reader shift-clicks a sort icon,
+    /// which adds that column to the sort rather than sorting by it alone.
+    ///
+    /// The default sorts by the first entry only.
+    fn perform_sorts(
+        &mut self,
+        sorts: &[(usize, ColumnSort)],
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if let Some(&(col_ix, sort)) = sorts.first() {
+            self.perform_sort(col_ix, sort, window, cx);
+        }
+    }
+
     /// Render the table head row.
     fn render_header(
         &mut self,

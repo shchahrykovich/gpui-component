@@ -42,6 +42,12 @@ pub struct Column {
     /// - The column and its cells cannot be selected
     /// - Useful for action columns (e.g., buttons, checkboxes) that shouldn't participate in selection
     pub selectable: bool,
+    /// This column's place among the columns the rows are sorted by, counting
+    /// from 1, or `None` for a column the rows are not sorted by.
+    ///
+    /// Drawn beside the sort icon while more than one column is sorted, so
+    /// the reader can tell the first key from the second.
+    pub sort_rank: Option<usize>,
     /// Whether a click on a cell of this column selects the cell's row.
     ///
     /// Meant for a column of row numbers. A click selects the row, a
@@ -83,6 +89,7 @@ impl Default for Column {
             resizable: true,
             movable: true,
             selectable: true,
+            sort_rank: None,
             selects_row: false,
             min_width: px(20.0),
             max_width: px(f32::MAX),
@@ -202,6 +209,13 @@ impl Column {
     /// ```
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
+        self
+    }
+
+    /// Set this column's place among the columns the rows are sorted by,
+    /// counting from 1. See [`Column::sort_rank`].
+    pub fn sort_rank(mut self, rank: Option<usize>) -> Self {
+        self.sort_rank = rank;
         self
     }
 
