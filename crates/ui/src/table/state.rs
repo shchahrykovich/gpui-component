@@ -12,14 +12,26 @@ use crate::{
     v_flex,
 };
 use gpui::{
-    AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
+    AnyElement, AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
     prelude::FluentBuilder, px, uniform_list,
 };
 
 use super::*;
+
+/// How far a column's resize grip reaches from the border on each side.
+const RESIZE_GRIP: Pixels = px(4.);
+
+/// Which side of a border a resize grip is on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum GripSide {
+    /// Inside the column the grip resizes, along its right edge.
+    Right,
+    /// Inside the column after it, along its left edge.
+    Left,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum SelectionMode {
@@ -392,6 +404,20 @@ where
             self.row_height = height;
             cx.notify();
         }
+    }
+
+    /// Whether column `col_ix` sits right after the column before it, so that
+    /// its left edge is that column's border. Not so for the first column, nor
+    /// across the edge of the pinned columns, where the next column can be
+    /// scrolled away from the one before it.
+    fn shares_border_with_previous(&self, col_ix: usize) -> bool {
+        let (Some(prev), Some(this)) = (
+            col_ix.checked_sub(1).and_then(|ix| self.col_groups.get(ix)),
+            self.col_groups.get(col_ix),
+        ) else {
+            return false;
+        };
+        !self.col_fixed || prev.column.fixed == this.column.fixed
     }
 
     /// The height every body row is drawn at.
@@ -1295,14 +1321,22 @@ where
         }
     }
 
+    /// The grip that resizes column `ix`, on one side of the border at the
+    /// column's right edge.
+    ///
+    /// Each border has a grip on both sides: one along the right edge of the
+    /// column it resizes, and one along the left edge of the column after it.
+    /// Together they make a target [`RESIZE_GRIP`] wide on each side of the
+    /// line. Each half lies inside its own header and is painted after that
+    /// header's cell, so it covers the cell: a press on it is never also a
+    /// press on a header, and a resize never ends in a click on a column.
     fn render_resize_handle(
         &self,
         ix: usize,
+        side: GripSide,
         _: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        const HANDLE_SIZE: Pixels = px(2.);
-
+    ) -> AnyElement {
         let resizable = self.col_resizable
             && self
                 .col_groups
@@ -1313,26 +1347,38 @@ where
             return div().into_any_element();
         }
 
-        let group_id = SharedString::from(format!("resizable-handle:{}", ix));
+        let group_id = SharedString::from(format!("resizable-handle:{}:{:?}", ix, side));
+        let line = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .group_hover(&group_id, |this| this.bg(cx.theme().border));
+        let line = match side {
+            // The border itself: always drawn, lit while the pointer is on it.
+            GripSide::Right => line.right_0().bg(cx.theme().table_row_border),
+            // The same line seen from the next column: drawn only while lit,
+            // one point to the left, so it lands on the border exactly.
+            GripSide::Left => line.left(px(-1.)),
+        };
 
-        h_flex()
-            .id(("resizable-handle", ix))
-            .group(group_id.clone())
+        div()
+            .id(SharedString::from(format!(
+                "resizable-handle-{}-{:?}",
+                ix, side
+            )))
+            .group(group_id)
             .occlude()
             .cursor_col_resize()
-            .h_full()
-            .w(HANDLE_SIZE)
-            .ml(-(HANDLE_SIZE))
-            .justify_end()
-            .items_center()
-            .child(
-                div()
-                    .h_full()
-                    .justify_center()
-                    .bg(cx.theme().table_row_border)
-                    .group_hover(&group_id, |this| this.bg(cx.theme().border).h_full())
-                    .w(px(1.)),
-            )
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(RESIZE_GRIP)
+            .map(|this| match side {
+                GripSide::Right => this.right_0(),
+                GripSide::Left => this.left_0(),
+            })
+            .child(line)
             .on_drag_move(
                 cx.listener(move |view, e: &DragMoveEvent<ResizeColumn>, window, cx| {
                     match e.drag(cx) {
@@ -1340,12 +1386,6 @@ where
                             if cx.entity_id() != *entity_id {
                                 return;
                             }
-
-                            // sync col widths into real widths
-                            // TODO: Consider to remove this, this may not need now.
-                            // for (_, col_group) in view.col_groups.iter_mut().enumerate() {
-                            //     col_group.width = col_group.bounds.size.width;
-                            // }
 
                             let ix = *ix;
                             view.resizing_col = Some(ix);
@@ -1356,9 +1396,10 @@ where
                                 .expect("BUG: invalid col index")
                                 .clone();
 
+                            // The border follows the pointer.
                             view.resize_cols(
                                 ix,
-                                e.event.position.x - HANDLE_SIZE - col_group.bounds.left(),
+                                e.event.position.x - col_group.bounds.left(),
                                 window,
                                 cx,
                             );
@@ -1373,21 +1414,30 @@ where
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
+            // The border follows the pointer, so the release often lands on a
+            // grip: listen both on it and off it.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| view.finish_resizing_col(cx)),
+            )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    if view.resizing_col.is_none() {
-                        return;
-                    }
-
-                    view.resizing_col = None;
-
-                    let new_widths = view.col_groups.iter().map(|g| g.width).collect();
-                    cx.emit(TableEvent::ColumnWidthsChanged(new_widths));
-                    cx.notify();
-                }),
+                cx.listener(|view, _, _, cx| view.finish_resizing_col(cx)),
             )
             .into_any_element()
+    }
+
+    /// A resize is over: report the widths the columns ended at.
+    fn finish_resizing_col(&mut self, cx: &mut Context<Self>) {
+        if self.resizing_col.is_none() {
+            return;
+        }
+
+        self.resizing_col = None;
+
+        let new_widths = self.col_groups.iter().map(|g| g.width).collect();
+        cx.emit(TableEvent::ColumnWidthsChanged(new_widths));
+        cx.notify();
     }
 
     /// Render the row header cell (when cell_selectable is enabled)
@@ -1533,8 +1583,12 @@ where
                         }
                     }),
             )
-            // resize handle
-            .child(self.render_resize_handle(col_ix, window, cx))
+            // The grips that resize this column, and the column before it.
+            .relative()
+            .child(self.render_resize_handle(col_ix, GripSide::Right, window, cx))
+            .when(self.shares_border_with_previous(col_ix), |this| {
+                this.child(self.render_resize_handle(col_ix - 1, GripSide::Left, window, cx))
+            })
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
@@ -2480,6 +2534,7 @@ mod tests {
 
         fn column(&self, col_ix: usize, _: &App) -> Column {
             Column::new(format!("c{col_ix}"), format!("c{col_ix}"))
+                .when(col_ix == 0, |column| column.fixed(ColumnFixed::Left))
         }
 
         fn render_td(
@@ -2566,5 +2621,26 @@ mod tests {
 
         cx.update(|_, cx| state.update(cx, |state, cx| state.set_row_height(None, cx)));
         state.read_with(cx, |state, _| assert_eq!(state.body_row_height(), header));
+    }
+
+    /// A column gets a grip on its left edge only where that edge is the
+    /// border of the column before it: not the first column, and not the
+    /// first column after the pinned ones, which scrolls away from them.
+    #[gpui::test]
+    fn only_a_column_right_after_another_resizes_it_from_its_left_edge(cx: &mut TestAppContext) {
+        let (state, cx) = table(cx);
+
+        state.read_with(cx, |state, _| {
+            assert!(!state.shares_border_with_previous(0), "the first column");
+            assert!(
+                !state.shares_border_with_previous(1),
+                "after the pinned column"
+            );
+            assert!(state.shares_border_with_previous(2));
+            assert!(
+                !state.shares_border_with_previous(3),
+                "past the last column"
+            );
+        });
     }
 }
